@@ -28,7 +28,7 @@ Output:
     - data/features/merged_features_clean.csv
 
 Usage:
-    python step3c_post_merge_cleaning.py
+    python step4_post_merge_cleaning.py
 
 Next Step:
     python src/data/step5_bias_detection_with_explicit_slicing.py
