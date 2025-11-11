@@ -439,48 +439,6 @@ class PointInTimeDataCleaner:
 
         return df, before_stats, after_stats
 
-    # def clean_income_statement(self) -> Tuple[pd.DataFrame, Dict, Dict]:
-    #     """Clean income statement with 45-day reporting lag."""
-    #     logger.info("\n" + "="*80)
-    #     logger.info("CLEANING INCOME STATEMENT")
-    #     logger.info("="*80)
-
-    #     # Load
-    #     filepath = self.raw_dir / 'company_income_raw.csv'
-    #     df = pd.read_csv(filepath)
-    #     before_stats = self.compute_statistics(df, 'Income Statement')
-
-    #     logger.info(f"\nBEFORE CLEANING:")
-    #     logger.info(f"  Shape: {df.shape}")
-    #     logger.info(f"  Missing: {before_stats['total_missing']} ({before_stats['missing_pct']}%)")
-
-    #     # Parse date
-    #     df['Date'] = pd.to_datetime(df['Date'])
-    #     df.sort_values(['Company', 'Date'], inplace=True)
-
-    #     # Apply 45-day reporting lag
-    #     logger.info(f"\n⏰ Applying {self.REPORTING_LAGS['earnings']}-day reporting lag...")
-    #     df = self.apply_reporting_lag(df, lag_days=self.REPORTING_LAGS['earnings'])
-
-    #     # Handle nulls per company (forward fill only)
-    #     df = self.handle_nulls_no_lookahead(df, date_col='Date', group_col='Company')
-
-    #     # Remove duplicates
-    #     df = df.drop_duplicates(subset=['Date', 'Company'], keep='last')
-
-    #     after_stats = self.compute_statistics(df, 'Income Statement')
-
-    #     logger.info(f"\nAFTER CLEANING:")
-    #     logger.info(f"  Shape: {df.shape}")
-    #     logger.info(f"  Missing: {after_stats['total_missing']} ({after_stats['missing_pct']}%)")
-
-    #     output_path = self.clean_dir / 'company_income_clean.csv'
-    #     df.to_csv(output_path, index=False)
-    #     logger.info(f"\n✓ Saved to: {output_path}")
-
-    #     return df, before_stats, after_stats
-
-
     def clean_income_statement(self) -> Tuple[pd.DataFrame, Dict, Dict]:
         """Clean income statement with 45-day reporting lag."""
         logger.info("\n" + "="*80)
