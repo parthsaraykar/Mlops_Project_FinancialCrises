@@ -10,36 +10,31 @@ on:
       - "dags/**"
       - "dvc.yaml"
       - "requirements.txt"
-      
-  # Allow manual triggering of the workflow
+
   workflow_dispatch:
     inputs:
       reason:
-        description: "Why are you manually triggering CI?"
+        description: "Reason for manually triggering CI"
         required: false
-        default: "Manual trigger for debugging"
-jobs:
+        default: "Manual debugging"
 
-  setup-python:
-    runs-on: ubuntu-latest
-    outputs:
-      python-version: "3.10"
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
+jobs:
 
   lint:
     runs-on: ubuntu-latest
-    needs: setup-python
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
       - name: Install lint dependencies
         run: |
+          pip install --upgrade pip wheel setuptools
           pip install flake8 black isort
 
       - name: Run Black check
@@ -54,54 +49,67 @@ jobs:
 
   run-tests:
     runs-on: ubuntu-latest
-    needs: setup-python
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install --upgrade pip wheel setuptools
           pip install -r requirements.txt
           pip install pytest pytest-xdist
 
       - name: Run All Unit Tests
-        run: |
-          pytest -n auto --maxfail=1
+        run: pytest -n auto --maxfail=1
 
 
   dvc-check:
     runs-on: ubuntu-latest
-    needs: setup-python
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install dependencies (DVC)
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install DVC dependencies
         run: |
+          pip install --upgrade pip wheel setuptools
           pip install -r requirements.txt
           pip install dvc[s3]
 
-      - name: Pull latest DVC data
+      - name: DVC Pull
         run: dvc pull
 
-      - name: Check DVC pipeline integrity
+      - name: DVC pipeline integrity check
         run: dvc repro --dry-run
 
 
   validation-checkpoints:
     runs-on: ubuntu-latest
-    needs: setup-python
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install --upgrade pip wheel setuptools
+          pip install -r requirements.txt
 
       - name: Validate Raw Data (Checkpoint 1)
         run: python src/validation/validate_checkpoint_1_raw.py || true
@@ -115,14 +123,20 @@ jobs:
 
   airflow-dag-check:
     runs-on: ubuntu-latest
-    needs: setup-python
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Airflow validator dependencies
-        run: pip install -r requirements.txt
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip wheel setuptools
+          pip install -r requirements.txt
 
       - name: Validate DAG syntax
         run: python -m py_compile dags/financial_crisis_pipeline.py
@@ -139,10 +153,10 @@ jobs:
     if: always()
 
     steps:
-      - name: Display Final CI Status
+      - name: Final CI Summary
         run: |
           echo "Lint: ${{ needs.lint.result }}"
           echo "Tests: ${{ needs.run-tests.result }}"
-          echo "DVC: ${{ needs.dvc-check.result }}"
+          echo "DVC Check: ${{ needs.dvc-check.result }}"
           echo "Validation: ${{ needs.validation-checkpoints.result }}"
           echo "DAG Check: ${{ needs.airflow-dag-check.result }}"
