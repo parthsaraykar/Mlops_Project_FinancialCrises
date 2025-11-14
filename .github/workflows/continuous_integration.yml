@@ -1,7 +1,7 @@
 name: Financial Crisis - Continuous Integration
 
 on:
-  pull_request:
+  push:
     branches:
       - main
     paths:
