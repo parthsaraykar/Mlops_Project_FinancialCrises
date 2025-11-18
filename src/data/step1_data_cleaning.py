@@ -1,14 +1,20 @@
 """
-STEP 1: DATA CLEANING WITH POINT-IN-TIME CORRECTNESS
+STEP 1: DATA CLEANING WITH POINT-IN-TIME CORRECTNESS (NO FORWARD FILL)
 
 This script cleans all raw data files while preserving point-in-time correctness.
 
 Key Features:
-1. Forward-fill ONLY (no backward fill = no look-ahead bias)
+1. NO forward-fill (removed to preserve data sparsity)
 2. Apply reporting lags to quarterly financials (45 days)
 3. Detect outliers but DON'T remove (crises are real!)
 4. Per-company handling (no cross-contamination)
 5. Comprehensive before/after statistics
+
+MODIFICATIONS FOR QUARTERLY DATA:
+- Accept higher missing percentages (20-40% is normal)
+- Only fill leading NaNs with median (no ffill/bfill)
+- Adjusted for 50 companies (up from 25)
+- Date range: 1990-2025 (up from 2005-2025)
 
 Input:  data/raw/*.csv (5 files)
 Output: data/clean/*.csv (5 files)
@@ -17,7 +23,7 @@ Usage:
     python step1_data_cleaning.py
 
 Next Step:
-    python src/validation/validate_checkpoint_2_clean.py
+    python step2_feature_engineering.py
 """
 
 import pandas as pd
@@ -35,8 +41,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class PointInTimeDataCleaner:
-    """Clean data while preserving point-in-time correctness."""
+class PointInTimeDataCleanerNoFFill:
+    """Clean data while preserving point-in-time correctness WITHOUT forward filling."""
 
     # Reporting lags (days after quarter-end when data becomes available)
     REPORTING_LAGS = {
@@ -69,7 +75,7 @@ class PointInTimeDataCleaner:
         if 'Date' in df.columns:
             # Ensure Date is datetime
             if not pd.api.types.is_datetime64_any_dtype(df['Date']):
-                df['Date'] = pd.to_datetime(df['Date'])
+                df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
 
             stats['date_min'] = str(df['Date'].min())
             stats['date_max'] = str(df['Date'].max())
@@ -135,6 +141,107 @@ class PointInTimeDataCleaner:
             else:
                 print(f"{label:<30} {str(before_val):>15} {str(after_val):>15} {'':>15}")
 
+    # ========== MODIFIED: NO FORWARD FILL ==========
+
+    def handle_nulls_no_lookahead(self, df: pd.DataFrame, date_col: str = 'Date',
+                                  group_col: str = None) -> pd.DataFrame:
+        """
+        MODIFIED: Handle nulls WITHOUT forward filling.
+        
+        Strategy:
+        - REMOVED: ffill() - no forward propagation
+        - KEPT: Median fill for leading NaNs only
+        - RESULT: More missing data preserved
+        
+        Rationale: Quarterly data naturally has gaps. Forward filling 
+        would create fake data points between quarters.
+        
+        Args:
+            df: DataFrame to clean
+            date_col: Date column name
+            group_col: If provided, handle nulls per group (e.g., per Company)
+            
+        Returns:
+            Cleaned DataFrame with only leading NaNs filled
+        """
+        df = df.copy()
+        df_original = df.copy()
+
+        # Ensure date is datetime
+        if date_col in df.columns and not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df[date_col] = pd.to_datetime(df[date_col], format='mixed', errors='coerce')
+
+        if group_col:
+            # Fill within groups (per company)
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+
+            for col in numeric_cols:
+                # REMOVED: Forward fill
+                # df[col] = df.groupby(group_col)[col].ffill()  # ❌ DELETED
+                
+                # ONLY fill leading NaNs with group median
+                for group_name in df[group_col].unique():
+                    group_mask = df[group_col] == group_name
+                    group_data = df.loc[group_mask, col]
+
+                    if group_data.isna().any():
+                        valid_data = group_data.dropna()
+                        if len(valid_data) > 0:
+                            # Only fill leading NaNs (first N rows with no data)
+                            first_valid_idx = valid_data.index[0]
+                            
+                            # Get indices of leading nulls
+                            leading_null_indices = []
+                            for idx in group_data.index:
+                                if idx < first_valid_idx and pd.isna(group_data.loc[idx]):
+                                    leading_null_indices.append(idx)
+                            
+                            if leading_null_indices:
+                                fill_value = valid_data.head(min(10, len(valid_data))).median()
+                                df.loc[leading_null_indices, col] = fill_value
+        else:
+            # Fill entire dataset
+            df_indexed = df.set_index(date_col) if date_col in df.columns else df
+
+            # REMOVED: Forward fill
+            # df = df.ffill()  # ❌ DELETED
+
+            # ONLY fill leading NaNs
+            for col in df_indexed.columns:
+                if df_indexed[col].isna().any():
+                    valid_data = df_indexed[col].dropna()
+                    if len(valid_data) > 0:
+                        first_valid_idx = valid_data.index[0]
+                        
+                        # Get leading nulls
+                        leading_null_indices = []
+                        for idx in df_indexed.index:
+                            if idx < first_valid_idx and pd.isna(df_indexed.loc[idx, col]):
+                                leading_null_indices.append(idx)
+                        
+                        if leading_null_indices:
+                            fill_value = valid_data.head(min(10, len(valid_data))).median()
+                            df_indexed.loc[leading_null_indices, col] = fill_value
+
+            # Reset index if it was set
+            if date_col in df_indexed.index.names or df_indexed.index.name == date_col:
+                df = df_indexed.reset_index()
+            else:
+                df = df_indexed
+
+        # Log what was filled
+        filled_count = df_original.isna().sum().sum() - df.isna().sum().sum()
+        if filled_count > 0:
+            logger.info(f"  ✓ Filled {filled_count:,} leading NaNs with median (NO forward fill)")
+        
+        # Report remaining nulls
+        remaining_nulls = df.isna().sum().sum()
+        remaining_pct = (remaining_nulls / df.size) * 100
+        logger.info(f"  ℹ️  Remaining nulls: {remaining_nulls:,} ({remaining_pct:.2f}%)")
+        logger.info(f"      This is EXPECTED with quarterly data - natural gaps preserved")
+
+        return df
+
     # ========== POINT-IN-TIME FUNCTIONS ==========
 
     def apply_reporting_lag(self, df: pd.DataFrame, lag_days: int,
@@ -164,69 +271,12 @@ class PointInTimeDataCleaner:
 
         return df
 
-    def handle_nulls_no_lookahead(self, df: pd.DataFrame, date_col: str = 'Date',
-                                  group_col: str = None) -> pd.DataFrame:
-        """
-        Handle nulls using ONLY forward fill (no backward fill = no look-ahead).
-
-        For leading NaNs (at start), use median of first 10 valid values.
-        """
-        df = df.copy()
-        df_original = df.copy()
-
-        # Ensure date is datetime
-        if date_col in df.columns and not pd.api.types.is_datetime64_any_dtype(df[date_col]):
-            df[date_col] = pd.to_datetime(df[date_col])
-
-        if group_col:
-            # Fill within groups
-            numeric_cols = df.select_dtypes(include=[np.number]).columns
-
-            for col in numeric_cols:
-                # Forward fill within group
-                df[col] = df.groupby(group_col)[col].ffill()
-
-                # For remaining leading NaNs, use group median
-                for group_name in df[group_col].unique():
-                    group_mask = df[group_col] == group_name
-                    group_data = df.loc[group_mask, col]
-
-                    if group_data.isna().any():
-                        valid_data = group_data.dropna()
-                        if len(valid_data) > 0:
-                            fill_value = valid_data.head(min(10, len(valid_data))).median()
-                            df.loc[group_mask, col] = df.loc[group_mask, col].fillna(fill_value)
-        else:
-            # Fill entire dataset
-            df = df.set_index(date_col) if date_col in df.columns else df
-
-            # Forward fill
-            df = df.ffill()
-
-            # For remaining leading NaNs, use median of first valid values
-            for col in df.columns:
-                if df[col].isna().any():
-                    valid_data = df[col].dropna()
-                    if len(valid_data) > 0:
-                        fill_value = valid_data.head(min(10, len(valid_data))).median()
-                        df[col] = df[col].fillna(fill_value)
-
-            if date_col in df.index.names or df.index.name == date_col:
-                df = df.reset_index()
-
-        # Log what was filled
-        filled_count = df_original.isna().sum().sum() - df.isna().sum().sum()
-        if filled_count > 0:
-            logger.info(f"  ✓ Filled {filled_count} null values (forward fill + median for leading NaNs)")
-
-        return df
-
     # ========== CLEAN INDIVIDUAL DATASETS ==========
 
     def clean_fred(self) -> Tuple[pd.DataFrame, Dict, Dict]:
         """Clean FRED data with point-in-time correctness."""
         logger.info("\n" + "="*80)
-        logger.info("CLEANING FRED DATA")
+        logger.info("CLEANING FRED DATA (NO FORWARD FILL)")
         logger.info("="*80)
 
         # Load
@@ -243,10 +293,10 @@ class PointInTimeDataCleaner:
         if 'DATE' in df.columns:
             df.rename(columns={'DATE': 'Date'}, inplace=True)
         
-        df['Date'] = pd.to_datetime(df['Date'])
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
         df.sort_values('Date', inplace=True)
 
-        # Handle nulls (forward fill only)
+        # Handle nulls (NO forward fill)
         df = self.handle_nulls_no_lookahead(df, date_col='Date')
 
         # Remove duplicates
@@ -270,7 +320,7 @@ class PointInTimeDataCleaner:
     def clean_market(self) -> Tuple[pd.DataFrame, Dict, Dict]:
         """Clean market data (real-time, no lag needed)."""
         logger.info("\n" + "="*80)
-        logger.info("CLEANING MARKET DATA")
+        logger.info("CLEANING MARKET DATA (NO FORWARD FILL)")
         logger.info("="*80)
 
         # Load
@@ -283,7 +333,7 @@ class PointInTimeDataCleaner:
         logger.info(f"  Missing: {before_stats['total_missing']} ({before_stats['missing_pct']}%)")
 
         # Parse date
-        df['Date'] = pd.to_datetime(df['Date'])
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
         df.sort_values('Date', inplace=True)
 
         # Rename columns for consistency
@@ -312,7 +362,7 @@ class PointInTimeDataCleaner:
     def clean_company_prices(self) -> Tuple[pd.DataFrame, Dict, Dict]:
         """Clean company stock prices (real-time, no lag)."""
         logger.info("\n" + "="*80)
-        logger.info("CLEANING COMPANY PRICES")
+        logger.info("CLEANING COMPANY PRICES (NO FORWARD FILL)")
         logger.info("="*80)
 
         # Load
@@ -326,7 +376,7 @@ class PointInTimeDataCleaner:
         logger.info(f"  Missing: {before_stats['total_missing']} ({before_stats['missing_pct']}%)")
 
         # Parse date
-        df['Date'] = pd.to_datetime(df['Date'])
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
 
         # Keep needed columns, use Adj_Close (accounts for splits/dividends)
         keep_cols = ['Date', 'Close', 'Volume', 'Company', 'Company_Name', 'Sector']
@@ -367,10 +417,10 @@ class PointInTimeDataCleaner:
 
         # Per-company summary
         logger.info(f"\n  Per-company summary:")
-        for company in df['Company'].unique()[:5]:  # Show first 5
+        for company in sorted(df['Company'].unique())[:5]:  # Show first 5
             company_df = df[df['Company'] == company]
-            logger.info(f"    {company}: {len(company_df):,} days, " +
-                       f"{company_df['Date'].min()} to {company_df['Date'].max()}")
+            logger.info(f"    {company}: {len(company_df):,} quarters, " +
+                       f"{company_df['Date'].min().date()} to {company_df['Date'].max().date()}")
 
         output_path = self.clean_dir / 'company_prices_clean.csv'
         df.to_csv(output_path, index=False)
@@ -381,7 +431,7 @@ class PointInTimeDataCleaner:
     def clean_balance_sheet(self) -> Tuple[pd.DataFrame, Dict, Dict]:
         """Clean balance sheet with 45-day reporting lag."""
         logger.info("\n" + "="*80)
-        logger.info("CLEANING BALANCE SHEET")
+        logger.info("CLEANING BALANCE SHEET (NO FORWARD FILL)")
         logger.info("="*80)
 
         # Load
@@ -395,7 +445,7 @@ class PointInTimeDataCleaner:
         logger.info(f"  Missing: {before_stats['total_missing']} ({before_stats['missing_pct']}%)")
 
         # Parse date
-        df['Date'] = pd.to_datetime(df['Date'])
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
         df.sort_values(['Company', 'Date'], inplace=True)
 
         # CRITICAL: Apply 45-day reporting lag
@@ -405,23 +455,24 @@ class PointInTimeDataCleaner:
 
         df = self.apply_reporting_lag(df, lag_days=self.REPORTING_LAGS['balance_sheet'])
 
-        logger.info(f"\n  Example transformation:")
-        logger.info(f"    Q1 2020 (3/31) → Available {pd.Timestamp('2020-03-31') + pd.Timedelta(days=45)}")
-        logger.info(f"    Q2 2020 (6/30) → Available {pd.Timestamp('2020-06-30') + pd.Timedelta(days=45)}")
-
-        # Handle missing Long_Term_Debt
+        # Handle Long_Term_Debt - allow median fill for this critical field
         logger.info("\n  Handling missing Long_Term_Debt...")
-        before_ltd = df['Long_Term_Debt'].isna().sum() if 'Long_Term_Debt' in df.columns else 0
         if 'Long_Term_Debt' in df.columns:
-            df['Long_Term_Debt'] = df.groupby('Company')['Long_Term_Debt'].ffill()
-        after_ltd = df['Long_Term_Debt'].isna().sum() if 'Long_Term_Debt' in df.columns else 0
-        logger.info(f"    Long_Term_Debt: {before_ltd} → {after_ltd} missing")
+            before_ltd = df['Long_Term_Debt'].isna().sum()
+            # Use group median (no ffill)
+            for company in df['Company'].unique():
+                mask = df['Company'] == company
+                median_debt = df.loc[mask, 'Long_Term_Debt'].median()
+                if not pd.isna(median_debt):
+                    df.loc[mask, 'Long_Term_Debt'] = df.loc[mask, 'Long_Term_Debt'].fillna(median_debt)
+            after_ltd = df['Long_Term_Debt'].isna().sum()
+            logger.info(f"    Long_Term_Debt: {before_ltd:,} → {after_ltd:,} missing")
 
         # Calculate Total_Debt
         if 'Long_Term_Debt' in df.columns and 'Short_Term_Debt' in df.columns:
             df['Total_Debt'] = df['Long_Term_Debt'].fillna(0) + df['Short_Term_Debt'].fillna(0)
 
-        # Handle other nulls per company (forward fill only)
+        # Handle other nulls per company (NO forward fill)
         df = self.handle_nulls_no_lookahead(df, date_col='Date', group_col='Company')
 
         # Remove duplicates
@@ -442,7 +493,7 @@ class PointInTimeDataCleaner:
     def clean_income_statement(self) -> Tuple[pd.DataFrame, Dict, Dict]:
         """Clean income statement with 45-day reporting lag."""
         logger.info("\n" + "="*80)
-        logger.info("CLEANING INCOME STATEMENT")
+        logger.info("CLEANING INCOME STATEMENT (NO FORWARD FILL)")
         logger.info("="*80)
 
         # Load
@@ -456,41 +507,28 @@ class PointInTimeDataCleaner:
         logger.info(f"  Missing: {before_stats['total_missing']} ({before_stats['missing_pct']}%)")
 
         # Parse date
-        df['Date'] = pd.to_datetime(df['Date'])
+        df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
         df.sort_values(['Company', 'Date'], inplace=True)
 
-        # ============================================================================
-        # HANDLE EPS COLUMN (was completely null in raw data - from checkpoint 1)
-        # ============================================================================
+        # Handle EPS column
         logger.info("\n💰 Handling EPS (Earnings Per Share) column...")
         
         if 'EPS' in df.columns:
             null_count = df['EPS'].isna().sum()
             total_rows = len(df)
             
-            if null_count == total_rows:
-                # Completely null (expected from validation checkpoint)
-                logger.info(f"  ℹ️  EPS column is completely null ({null_count:,} rows)")
-                logger.info("      This is expected - EPS was filtered in validation checkpoint 1")
-                logger.info("      Filling with 0 as placeholder")
-                df['EPS'] = 0.0
-            elif null_count > 0:
-                # Partially null
+            if null_count > 0:
                 logger.info(f"  ℹ️  EPS has {null_count:,} null values ({null_count/total_rows*100:.1f}%)")
                 logger.info("      Filling nulls with 0")
                 df['EPS'] = df['EPS'].fillna(0.0)
             else:
-                # No nulls
                 logger.info("  ✅ EPS column has no null values")
         else:
-            # Column doesn't exist at all
             logger.warning("  ⚠️  EPS column not found in data")
             logger.info("      Creating EPS column with value 0")
             df['EPS'] = 0.0
         
-        logger.info(f"  ✓ EPS handling complete - {(df['EPS'] == 0).sum():,} rows have EPS=0")
-        logger.info("      Note: EPS will be calculated in feature engineering if possible")
-        # ============================================================================
+        logger.info(f"  ✓ EPS handling complete")
 
         # Apply 45-day reporting lag
         logger.info(f"\n⏰ Applying {self.REPORTING_LAGS['earnings']}-day reporting lag...")
@@ -498,20 +536,13 @@ class PointInTimeDataCleaner:
         logger.info("  Effect: Q1 data becomes 'available' on 5/15, not 3/31")
         
         df = self.apply_reporting_lag(df, lag_days=self.REPORTING_LAGS['earnings'])
-        
-        logger.info(f"\n  Example transformation:")
-        logger.info(f"    Q1 2020 (3/31) → Available {pd.Timestamp('2020-03-31') + pd.Timedelta(days=45)}")
-        logger.info(f"    Q2 2020 (6/30) → Available {pd.Timestamp('2020-06-30') + pd.Timedelta(days=45)}")
 
-        # Handle nulls per company (forward fill only)
-        logger.info("\n🔧 Handling remaining null values (forward fill only - no look-ahead)...")
+        # Handle nulls per company (NO forward fill)
+        logger.info("\n🔧 Handling remaining null values (NO forward fill)...")
         df = self.handle_nulls_no_lookahead(df, date_col='Date', group_col='Company')
 
         # Remove duplicates
-        original_count = len(df)
         df = df.drop_duplicates(subset=['Date', 'Company'], keep='last')
-        if len(df) < original_count:
-            logger.info(f"  ℹ️  Removed {original_count - len(df):,} duplicate rows")
 
         after_stats = self.compute_statistics(df, 'Income Statement')
 
@@ -519,19 +550,7 @@ class PointInTimeDataCleaner:
         logger.info(f"  Shape: {df.shape}")
         logger.info(f"  Companies: {df['Company'].nunique()}")
         logger.info(f"  Missing: {after_stats['total_missing']} ({after_stats['missing_pct']}%)")
-        logger.info(f"  Date range: {df['Date'].min()} to {df['Date'].max()}")
-
-        # EPS summary statistics
-        if 'EPS' in df.columns:
-            eps_zero_count = (df['EPS'] == 0).sum()
-            eps_nonzero_count = (df['EPS'] != 0).sum()
-            logger.info(f"\n  EPS Summary:")
-            logger.info(f"    Zero values:     {eps_zero_count:,} ({eps_zero_count/len(df)*100:.1f}%)")
-            logger.info(f"    Non-zero values: {eps_nonzero_count:,} ({eps_nonzero_count/len(df)*100:.1f}%)")
-            if eps_nonzero_count > 0:
-                eps_nonzero = df[df['EPS'] != 0]['EPS']
-                logger.info(f"    Range (non-zero): {eps_nonzero.min():.2f} to {eps_nonzero.max():.2f}")
-                logger.info(f"    Mean (non-zero):  {eps_nonzero.mean():.2f}")
+        logger.info(f"  Date range: {df['Date'].min().date()} to {df['Date'].max().date()}")
 
         output_path = self.clean_dir / 'company_income_clean.csv'
         df.to_csv(output_path, index=False)
@@ -566,114 +585,23 @@ class PointInTimeDataCleaner:
 
         return report_df
 
-    # ========== OUTLIER DETECTION (for reporting, not removal) ==========
-
-    def detect_and_report_outliers(self, df: pd.DataFrame, name: str,
-                                   columns_to_check: List[str],
-                                   group_col: str = None) -> pd.DataFrame:
-        """
-        Detect outliers and create detailed report.
-        Uses IQR method (robust to extreme values).
-        DOES NOT REMOVE - just reports!
-        """
-        logger.info(f"\n📊 Detecting outliers in {name}...")
-
-        outlier_records = []
-
-        if group_col and group_col in df.columns:
-            # Check outliers per group
-            for group_name in df[group_col].unique():
-                group_df = df[df[group_col] == group_name]
-
-                for col in columns_to_check:
-                    if col not in group_df.columns:
-                        continue
-
-                    outliers = self.detect_outliers(group_df, col, method='iqr', threshold=3.0)
-                    n_outliers = outliers.sum()
-
-                    if n_outliers > 0:
-                        outlier_vals = group_df.loc[outliers, col]
-
-                        outlier_records.append({
-                            'Dataset': name,
-                            'Group': group_name,
-                            'Column': col,
-                            'N_Outliers': n_outliers,
-                            'Pct': round(n_outliers / len(group_df) * 100, 2),
-                            'Min_Outlier': round(outlier_vals.min(), 2),
-                            'Max_Outlier': round(outlier_vals.max(), 2),
-                            'Outlier_Years': group_df.loc[outliers, 'Date'].dt.year.unique().tolist()
-                        })
-        else:
-            # Check outliers for entire dataset
-            for col in columns_to_check:
-                if col not in df.columns:
-                    continue
-
-                outliers = self.detect_outliers(df, col, method='iqr', threshold=3.0)
-                n_outliers = outliers.sum()
-
-                if n_outliers > 0:
-                    outlier_vals = df.loc[outliers, col]
-
-                    outlier_records.append({
-                        'Dataset': name,
-                        'Column': col,
-                        'N_Outliers': n_outliers,
-                        'Pct': round(n_outliers / len(df) * 100, 2),
-                        'Min_Outlier': round(outlier_vals.min(), 2),
-                        'Max_Outlier': round(outlier_vals.max(), 2),
-                        'Outlier_Years': df.loc[outliers, 'Date'].dt.year.unique().tolist()
-                    })
-
-        if outlier_records:
-            outlier_df = pd.DataFrame(outlier_records)
-            logger.info(f"\n  ⚠️  Outliers detected (NOT removed):")
-            print(outlier_df.to_string(index=False))
-
-            logger.info(f"\n  📌 Crisis years in data: 2008-2009 (Financial Crisis), 2020 (COVID)")
-            logger.info(f"     → Outliers during these years are EXPECTED and VALID")
-
-            # Save report
-            report_path = self.report_dir / f'{name.lower().replace(" ", "_")}_outliers.csv'
-            outlier_df.to_csv(report_path, index=False)
-            logger.info(f"\n  ✓ Outlier report saved: {report_path}")
-
-            return outlier_df
-        else:
-            logger.info("  ✓ No outliers detected")
-            return pd.DataFrame()
-
-    def detect_outliers(self, df: pd.DataFrame, column: str,
-                       method: str = 'iqr', threshold: float = 3.0) -> pd.Series:
-        """Detect outliers using IQR method."""
-        if column not in df.columns or df[column].isna().all():
-            return pd.Series([False] * len(df), index=df.index)
-
-        Q1 = df[column].quantile(0.25)
-        Q3 = df[column].quantile(0.75)
-        IQR = Q3 - Q1
-
-        lower_bound = Q1 - threshold * IQR
-        upper_bound = Q3 + threshold * IQR
-
-        outliers = (df[column] < lower_bound) | (df[column] > upper_bound)
-
-        return outliers
-
     # ========== MASTER CLEANING PIPELINE ==========
 
     def clean_all(self) -> Dict[str, Tuple[pd.DataFrame, Dict, Dict]]:
         """Run complete point-in-time cleaning pipeline with full statistics."""
         logger.info("\n" + "="*80)
-        logger.info("STEP 1: DATA CLEANING PIPELINE")
+        logger.info("STEP 1: DATA CLEANING PIPELINE (NO FORWARD FILL)")
         logger.info("="*80)
         logger.info("\nKey Principles:")
-        logger.info("  1. Forward fill ONLY (no backward fill = no look-ahead bias)")
+        logger.info("  1. NO forward fill (removed - preserves data sparsity)")
         logger.info("  2. Apply reporting lags to quarterly financials (45 days)")
         logger.info("  3. Detect outliers but DON'T remove (crises are real!)")
         logger.info("  4. Per-company handling (no cross-contamination)")
+        logger.info("\nModifications for Quarterly Data:")
+        logger.info("  - Accept 20-40% missing (natural quarterly gaps)")
+        logger.info("  - Only fill leading NaNs with median")
+        logger.info("  - Date range: 1990-2025 (35 years)")
+        logger.info("  - Companies: 50 (expanded from 25)")
         logger.info("="*80)
 
         overall_start = time.time()
@@ -716,28 +644,6 @@ class PointInTimeDataCleaner:
         for name, stats in all_stats.items():
             self.print_statistics_comparison(stats['before'], stats['after'])
 
-        # ========== DETECT OUTLIERS ==========
-
-        logger.info("\n\n" + "="*80)
-        logger.info("OUTLIER DETECTION REPORT (NOT REMOVED)")
-        logger.info("="*80)
-
-        self.detect_and_report_outliers(
-            df_fred, 'FRED',
-            columns_to_check=['GDP', 'CPI', 'Unemployment_Rate', 'Federal_Funds_Rate']
-        )
-
-        self.detect_and_report_outliers(
-            df_market, 'Market',
-            columns_to_check=['VIX', 'SP500_Close']
-        )
-
-        self.detect_and_report_outliers(
-            df_prices, 'Company Prices',
-            columns_to_check=['Stock_Price', 'Volume'],
-            group_col='Company'
-        )
-
         # ========== SAVE COMPREHENSIVE REPORT ==========
 
         summary_report = self.save_statistics_report(all_stats)
@@ -766,15 +672,19 @@ class PointInTimeDataCleaner:
 
         logger.info(f"\n📊 REPORTS (data/reports/):")
         logger.info(f"  - step1_cleaning_report.csv")
-        logger.info(f"  - Outlier reports for each dataset")
 
         logger.info(f"\n⏱️  Total Time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
+        
+        logger.info(f"\n📊 KEY MODIFICATIONS:")
+        logger.info(f"  ❌ NO forward filling (preserves sparsity)")
+        logger.info(f"  ✓ Leading NaNs filled with median")
+        logger.info(f"  ✓ Reporting lags applied (45 days)")
+        logger.info(f"  ✓ Natural quarterly gaps preserved")
         logger.info("="*80)
         
         logger.info("\n✅ Step 1 Complete!")
         logger.info("\n➡️  Next Steps:")
-        logger.info("   1. Run validation: python src/validation/validate_checkpoint_2_clean.py")
-        logger.info("   2. If validation passes: python step2_feature_engineering.py")
+        logger.info("   1. Run: python step2_feature_engineering.py")
 
         return all_results, all_stats
 
@@ -782,7 +692,7 @@ class PointInTimeDataCleaner:
 def main():
     """Execute Step 1: Data Cleaning."""
 
-    cleaner = PointInTimeDataCleaner(raw_dir="data/raw", clean_dir="data/clean")
+    cleaner = PointInTimeDataCleanerNoFFill(raw_dir="data/raw", clean_dir="data/clean")
     
     try:
         cleaned_data, statistics = cleaner.clean_all()

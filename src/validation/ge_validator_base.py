@@ -1,6 +1,12 @@
 """
 Great Expectations Validator Base Class
-Unified validator for all pipeline stages with multi-level severity
+UPDATED FOR QUARTERLY DATA (1990-2025, 50 companies)
+
+Changes:
+- Adjusted thresholds for quarterly sparsity (20-40% missing OK)
+- Updated date ranges (1990-2025)
+- Row count expectations for quarterly frequency
+- Lenient value ranges for 35 years of history
 """
 
 import pandas as pd
@@ -24,9 +30,13 @@ class ValidationSeverity(Enum):
 
 class GEValidatorBase:
     """
-    Base class for Great Expectations validation across all pipeline stages.
+    Base class for Great Expectations validation - UPDATED FOR QUARTERLY DATA.
     
-    Integrates with RobustValidator for multi-level severity checking.
+    Key Changes:
+    - Accept 20-40% missing (quarterly gaps are normal)
+    - Row counts: 100-500 for quarterly (vs 1000+ for daily)
+    - Date range: 1990-2025 (35 years)
+    - Companies: 50 (was 25)
     """
     
     def __init__(self, context_root_dir: str = "great_expectations"):
@@ -233,22 +243,20 @@ class GEValidatorBase:
         """
         Determine severity based on expectation type and column.
         
-        Rules:
-        - Column existence: CRITICAL
-        - NOT NULL on key columns: CRITICAL
-        - Type checks: CRITICAL
-        - Range checks: ERROR
-        - Value set checks: ERROR
-        - Statistical checks: WARNING
+        UPDATED FOR QUARTERLY DATA:
+        - More lenient on completeness (quarterly gaps are normal)
+        - Stricter on existence and types
         """
         # CRITICAL: Must pass
         if 'exist' in expectation_type:
             return ValidationSeverity.CRITICAL
         
         if 'not_be_null' in expectation_type:
-            key_columns = ['Date', 'Company', 'GDP', 'CPI', 'VIX', 'Stock_Price', 'Revenue']
-            if column in key_columns:
+            # UPDATED: For quarterly, only key columns are CRITICAL
+            critical_columns = ['Date', 'Company']
+            if column in critical_columns:
                 return ValidationSeverity.CRITICAL
+            # Others are just ERROR (quarterly data has gaps)
             return ValidationSeverity.ERROR
         
         if 'type' in expectation_type.lower():
@@ -259,6 +267,9 @@ class GEValidatorBase:
             return ValidationSeverity.ERROR
         
         if 'in_set' in expectation_type:
+            return ValidationSeverity.ERROR
+        
+        if 'unique' in expectation_type:
             return ValidationSeverity.ERROR
         
         # WARNING: Nice to pass

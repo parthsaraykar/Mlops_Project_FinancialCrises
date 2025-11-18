@@ -1,26 +1,23 @@
 """
-STEP 3: DATA MERGING
+STEP 3: DATA MERGING (QUARTERLY-AWARE)
 
-Combine feature-engineered datasets into two final merged datasets:
+Combine feature datasets into final merged datasets for modeling.
 
 Pipeline 1 (VAE - Scenario Generation):
-    macro_features.csv = FRED + Market
-    
-    - Daily macro/market data only
+    macro_features.csv = FRED + Market (resampled to quarterly)
+    - Quarterly macro/market data only
     - Used to train VAE for generating stress scenarios
-    - ~5,500 rows × ~65 columns
 
 Pipeline 2 (XGBoost/LSTM - Prediction):
     merged_features.csv = FRED + Market + Company
-    - Daily company-date observations with full macro context
+    - Quarterly company-date observations with full macro context
     - Used to train predictive models
-    - ~187,000 rows × ~135 columns (25 companies × ~7,500 days)
 
 Merge Strategy:
-- Pipeline 1: Simple merge on Date (outer join)
-- Pipeline 2: Merge macro+market first, then merge with company data on Date
-- Handle missing values appropriately
-- Validate merge quality
+- Resample daily market data to quarterly BEFORE merging
+- Pipeline 1: Merge FRED + Market on Date (both quarterly)
+- Pipeline 2: Merge macro+market with company data on Date
+- Handle missing values appropriately (accept 20-40% for quarterly)
 
 Input:  data/features/fred_features.csv, market_features.csv, company_features.csv
 Output: data/features/macro_features.csv, merged_features.csv
@@ -29,7 +26,7 @@ Usage:
     python step3_data_merging.py
 
 Next Step:
-    python src/validation/validate_checkpoint_3_merged.py
+    python step4_post_merge_cleaning.py (if needed)
 """
 
 import pandas as pd
@@ -47,8 +44,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class DataMerger:
-    """Merge feature-engineered datasets into final datasets for modeling."""
+class QuarterlyDataMerger:
+    """
+    Merge feature-engineered datasets.
+    
+    SIMPLIFIED: Step 2 already created daily + quarterly features.
+    Step 3 just merges company + macro quarterly data.
+    """
 
     def __init__(self, features_dir: str = "data/features"):
         self.features_dir = Path(features_dir)
@@ -56,451 +58,396 @@ class DataMerger:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
     def load_feature_datasets(self) -> Dict[str, pd.DataFrame]:
-        """Load all feature-engineered datasets from Step 2."""
+        """Load all feature datasets from Step 2."""
         logger.info("="*80)
-        logger.info("LOADING FEATURE-ENGINEERED DATASETS")
+        logger.info("LOADING FEATURE DATASETS FROM STEP 2")
         logger.info("="*80)
 
         data = {}
 
-        # --- FRED FEATURES ---
-        fred_path = self.features_dir / 'fred_features.csv'
-        if fred_path.exists():
-            data['fred'] = pd.read_csv(fred_path, parse_dates=['Date'])
-            # ✅ Defensive datetime enforcement
-            data['fred']['Date'] = pd.to_datetime(data['fred']['Date'], errors='coerce')
-            logger.info(f"\n✓ Loaded fred_features: {data['fred'].shape}")
-            logger.info(f"  Date range: {data['fred']['Date'].min().date()} to {data['fred']['Date'].max().date()}")
-            logger.info(f"  Columns: {list(data['fred'].columns[:10])}...")
-        else:
-            logger.error(f"\n❌ fred_features.csv not found!")
-            raise FileNotFoundError(f"{fred_path} does not exist. Run Step 2 first.")
-
-        # --- MARKET FEATURES ---
-        market_path = self.features_dir / 'market_features.csv'
-        if market_path.exists():
-            data['market'] = pd.read_csv(market_path, parse_dates=['Date'])
-            # ✅ Defensive datetime enforcement
-            data['market']['Date'] = pd.to_datetime(data['market']['Date'], errors='coerce')
-            logger.info(f"\n✓ Loaded market_features: {data['market'].shape}")
-            logger.info(f"  Date range: {data['market']['Date'].min().date()} to {data['market']['Date'].max().date()}")
-            logger.info(f"  Columns: {list(data['market'].columns[:10])}...")
-        else:
-            logger.error(f"\n❌ market_features.csv not found!")
-            raise FileNotFoundError(f"{market_path} does not exist. Run Step 2 first.")
-
-        # --- COMPANY FEATURES ---
+        # Check what files Step 2 created
+        macro_daily_path = self.features_dir / 'macro_features_daily.csv'
+        macro_quarterly_path = self.features_dir / 'macro_features_quarterly.csv'
         company_path = self.features_dir / 'company_features.csv'
+
+        # Load macro_features_daily (for VAE)
+        if macro_daily_path.exists():
+            data['macro_daily'] = pd.read_csv(macro_daily_path, parse_dates=['Date'])
+            data['macro_daily']['Date'] = pd.to_datetime(data['macro_daily']['Date'], errors='coerce')
+            logger.info(f"\n✓ Macro Daily: {data['macro_daily'].shape}")
+            logger.info(f"  Date range: {data['macro_daily']['Date'].min().date()} to {data['macro_daily']['Date'].max().date()}")
+            logger.info(f"  Use: VAE training (daily with quarterly aggregates)")
+        else:
+            logger.warning(f"  ⚠️  macro_features_daily.csv not found")
+
+        # Load macro_features_quarterly (for merging with company)
+        if macro_quarterly_path.exists():
+            data['macro_quarterly'] = pd.read_csv(macro_quarterly_path, parse_dates=['Date'])
+            data['macro_quarterly']['Date'] = pd.to_datetime(data['macro_quarterly']['Date'], errors='coerce')
+            logger.info(f"\n✓ Macro Quarterly: {data['macro_quarterly'].shape}")
+            logger.info(f"  Date range: {data['macro_quarterly']['Date'].min().date()} to {data['macro_quarterly']['Date'].max().date()}")
+            logger.info(f"  Use: Merge with company data")
+        else:
+            logger.warning(f"  ⚠️  macro_features_quarterly.csv not found")
+
+        # Load company_features (quarterly)
         if company_path.exists():
             data['company'] = pd.read_csv(company_path, parse_dates=['Date'])
-            # ✅ Defensive datetime enforcement
             data['company']['Date'] = pd.to_datetime(data['company']['Date'], errors='coerce')
-            logger.info(f"\n✓ Loaded company_features: {data['company'].shape}")
-            logger.info(f"  Date range: {data['company']['Date'].min().date()} to {data['company']['Date'].max().date()}")
+            logger.info(f"\n✓ Company: {data['company'].shape} (QUARTERLY)")
             logger.info(f"  Companies: {data['company']['Company'].nunique()}")
-            logger.info(f"    {sorted(data['company']['Company'].unique())}")
+            logger.info(f"  Date range: {data['company']['Date'].min().date()} to {data['company']['Date'].max().date()}")
         else:
-            logger.error(f"\n❌ company_features.csv not found!")
-            raise FileNotFoundError(f"{company_path} does not exist. Run Step 2 first.")
+            raise FileNotFoundError(f"{company_path} not found. Run Step 2 first.")
 
         return data
 
-    # ========== MERGE PIPELINE 1: MACRO + MARKET ==========
+    # ========== RESAMPLE TO QUARTERLY ==========
 
-    def merge_pipeline1(self, fred_df: pd.DataFrame, market_df: pd.DataFrame) -> pd.DataFrame:
+    def resample_to_quarterly(self, df: pd.DataFrame, name: str) -> pd.DataFrame:
         """
-        Merge FRED and Market data for Pipeline 1 (VAE).
-
-        Strategy: Outer join on Date to keep all dates from both datasets.
+        Resample daily frequency to quarterly (quarter-end).
         
-        Args:
-            fred_df: FRED features DataFrame
-            market_df: Market features DataFrame
+        Aggregation rules:
+        - Price/index: last value of quarter
+        - Volume: sum over quarter (if exists)
+        - Returns/changes: mean over quarter
+        - Volatility: mean over quarter
+        """
+        logger.info(f"\n   Resampling {name} to quarterly...")
+        
+        df = df.copy()
+        df = df.set_index('Date').sort_index()
+        
+        # Identify numeric columns
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        
+        # Define aggregation rules
+        agg_dict = {}
+        
+        for col in numeric_cols:
+            col_lower = col.lower()
             
-        Returns:
-            Merged DataFrame for VAE training
+            # Volume should be summed
+            if 'volume' in col_lower:
+                agg_dict[col] = 'sum'
+            # Returns, changes should be averaged
+            elif any(x in col_lower for x in ['return', 'change', 'growth']):
+                agg_dict[col] = 'mean'
+            # Volatility should be averaged
+            elif any(x in col_lower for x in ['volatility', 'std', 'var']):
+                agg_dict[col] = 'mean'
+            # Everything else (prices, indices, ratios) - take last
+            else:
+                agg_dict[col] = 'last'
+        
+        # Resample to quarter-end
+        df_quarterly = df.resample('Q').agg(agg_dict)
+        
+        # Handle categorical columns
+        cat_cols = df.select_dtypes(exclude=[np.number]).columns
+        for col in cat_cols:
+            df_quarterly[col] = df[col].resample('Q').last()
+        
+        df_quarterly = df_quarterly.reset_index()
+        
+        logger.info(f"   {name}: {len(df):,} rows → {len(df_quarterly):,} rows (quarterly)")
+        
+        return df_quarterly
+
+    # ========== PIPELINE 1: MACRO + MARKET (QUARTERLY) ==========
+
+    def merge_pipeline1_quarterly(self, fred_df: pd.DataFrame, market_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Pipeline 1a: Merge FRED + Market at QUARTERLY frequency for VAE.
+        
+        Steps:
+        1. FRED is already quarterly (or mixed frequency) - resample to quarterly
+        2. Market is daily - resample to quarterly
+        3. Merge on Date (quarter-end dates)
         """
         logger.info("\n" + "="*80)
-        logger.info("PIPELINE 1: MERGING FRED + MARKET (FOR VAE)")
+        logger.info("PIPELINE 1a: MACRO + MARKET (QUARTERLY FOR VAE)")
         logger.info("="*80)
 
-        logger.info(f"\nInput datasets:")
-        logger.info(f"  FRED:   {fred_df.shape} ({fred_df['Date'].min().date()} to {fred_df['Date'].max().date()})")
-        logger.info(f"  Market: {market_df.shape} ({market_df['Date'].min().date()} to {market_df['Date'].max().date()})")
+        # Resample FRED to quarterly (in case it has mixed frequencies)
+        logger.info("\n1. Resampling FRED to quarterly...")
+        fred_quarterly = self.resample_to_quarterly(fred_df, "FRED")
 
-        # Check for overlapping date ranges
-        fred_dates = set(fred_df['Date'])
-        market_dates = set(market_df['Date'])
-        overlap = len(fred_dates & market_dates)
-        
-        logger.info(f"\n  Date overlap: {overlap:,} common dates")
-        logger.info(f"  FRED-only dates: {len(fred_dates - market_dates):,}")
-        logger.info(f"  Market-only dates: {len(market_dates - fred_dates):,}")
+        # Resample Market to quarterly
+        logger.info("\n2. Resampling Market to quarterly...")
+        market_quarterly = self.resample_to_quarterly(market_df, "Market")
 
-        # Merge on Date (outer join to keep all dates)
-        logger.info(f"\nMerging on: Date (outer join)")
+        # Merge on Date
+        logger.info("\n3. Merging FRED + Market on quarter-end dates...")
         
         merged = pd.merge(
-            fred_df,
-            market_df,
+            fred_quarterly,
+            market_quarterly,
             on='Date',
             how='outer',
             suffixes=('_fred', '_market')
         )
 
-        # Sort by date
         merged.sort_values('Date', inplace=True)
         merged.reset_index(drop=True, inplace=True)
 
-        logger.info(f"\n✓ Merged shape: {merged.shape}")
+        logger.info(f"\n✓ Pipeline 1a merged (QUARTERLY): {merged.shape}")
         logger.info(f"  Date range: {merged['Date'].min().date()} to {merged['Date'].max().date()}")
-        logger.info(f"  Total days: {len(merged):,}")
-
-        # === CHECK FOR DUPLICATE COLUMNS ===
-        logger.info(f"\nChecking for duplicate columns...")
+        logger.info(f"  Quarters: {len(merged)}")
         
-        duplicate_cols = [col for col in merged.columns if col.endswith('_fred') or col.endswith('_market')]
-        
-        if duplicate_cols:
-            logger.warning(f"  ⚠️  Found {len(duplicate_cols)} duplicate columns with suffixes:")
-            for col in duplicate_cols[:5]:
-                logger.warning(f"     - {col}")
-            logger.info(f"  Note: These will be cleaned in Step 3c")
-        else:
-            logger.info(f"  ✓ No duplicate columns")
-
-        # === CHECK FOR MISSING VALUES ===
-        logger.info(f"\nChecking missing values after merge...")
-        
+        # Check missing values
         missing_pct = (merged.isna().sum() / len(merged)) * 100
-        high_missing = missing_pct[missing_pct > 5].sort_values(ascending=False)
-
+        high_missing = missing_pct[missing_pct > 10]
+        
         if len(high_missing) > 0:
-            logger.warning(f"\n  ⚠️  Columns with >5% missing values:")
-            for col, pct in high_missing.head(10).items():
-                logger.warning(f"     {col}: {pct:.1f}%")
-
-            logger.info(f"\n  Filling missing values with forward fill...")
-            merged = merged.ffill().bfill()
-
-            # Check again
-            missing_after = (merged.isna().sum() / len(merged)) * 100
-            total_missing = missing_after.sum()
-            logger.info(f"  ✓ Total missing after fill: {total_missing:.2f}%")
+            logger.warning(f"\n  ⚠️  {len(high_missing)} columns with >10% missing")
+            logger.info(f"      This is EXPECTED with quarterly data")
         else:
-            logger.info(f"  ✓ No significant missing values")
-
-        # === VERIFY KEY COLUMNS ===
-        logger.info(f"\nVerifying key columns...")
+            logger.info(f"\n  ✓ Missing data: {merged.isna().sum().sum() / merged.size * 100:.2f}%")
         
-        key_macro_cols = ['GDP', 'CPI', 'Unemployment_Rate', 'Federal_Funds_Rate']
-        key_market_cols = ['VIX', 'SP500_Return_1D']
-        
-        # Handle SP500_Close vs SP500
-        if 'SP500_Close' in merged.columns:
-            key_market_cols.append('SP500_Close')
-        elif 'SP500' in merged.columns:
-            key_market_cols.append('SP500')
-
-        missing_key_cols = []
-        for col in key_macro_cols + key_market_cols:
-            if col not in merged.columns:
-                missing_key_cols.append(col)
-
-        if missing_key_cols:
-            logger.warning(f"  ⚠️  Key columns not found: {missing_key_cols}")
-        else:
-            logger.info(f"  ✓ All key columns present")
-
         return merged
 
-    # ========== MERGE PIPELINE 2: MACRO + MARKET + COMPANY ==========
+    # ========== PIPELINE 1b: MACRO + MARKET (DAILY) - NEW! ==========
 
-    def merge_pipeline2(self, fred_df: pd.DataFrame, market_df: pd.DataFrame,
-                       company_df: pd.DataFrame) -> pd.DataFrame:
+    def merge_pipeline1_daily(self, fred_df: pd.DataFrame, market_df: pd.DataFrame) -> pd.DataFrame:
         """
-        Merge FRED, Market, and Company data for Pipeline 2 (XGBoost/LSTM).
-
-        Strategy:
-        1. Merge FRED + Market on Date (same as Pipeline 1)
-        2. Merge result with Company on Date
-        3. This creates Company-Date observations with full macro context
+        Pipeline 1b: Merge FRED + Market at DAILY frequency for VAE.
         
-        Args:
-            fred_df: FRED features
-            market_df: Market features
-            company_df: Company features
-            
-        Returns:
-            Merged DataFrame for prediction models
+        NEW: Creates daily version for VAE training.
+        
+        Steps:
+        1. Market is daily - keep as-is
+        2. FRED is mixed frequency - forward fill to daily (OK for macro data)
+        3. Merge on Date
         """
         logger.info("\n" + "="*80)
-        logger.info("PIPELINE 2: MERGING FRED + MARKET + COMPANY (FOR XGBOOST/LSTM)")
+        logger.info("PIPELINE 1b: MACRO + MARKET (DAILY FOR VAE)")
         logger.info("="*80)
 
-        # === STEP 1: Merge FRED + Market ===
-        logger.info(f"\nStep 1: Merging FRED + Market...")
+        logger.info("\n1. Preparing daily FRED data...")
         
-        macro_market = pd.merge(
-            fred_df,
-            market_df,
-            on='Date',
-            how='outer',
-            suffixes=('_fred', '_market')
-        )
+        # Set Date as index
+        fred_daily = fred_df.copy()
+        fred_daily = fred_daily.set_index('Date').sort_index()
         
-        macro_market.sort_values('Date', inplace=True)
-        logger.info(f"  ✓ Macro+Market shape: {macro_market.shape}")
-
-        # === STEP 2: Merge with Company data ===
-        logger.info(f"\nStep 2: Merging (Macro+Market) with Company data...")
-        logger.info(f"  Company data shape: {company_df.shape}")
-        logger.info(f"  Companies: {company_df['Company'].nunique()}")
-        logger.info(f"  Date range: {company_df['Date'].min().date()} to {company_df['Date'].max().date()}")
-
-        # Check date alignment
-        company_dates = set(company_df['Date'])
-        macro_dates = set(macro_market['Date'])
-        overlap = len(company_dates & macro_dates)
+        # Get date range from market (daily)
+        market_daily = market_df.copy()
+        market_daily = market_daily.set_index('Date').sort_index()
         
-        logger.info(f"\n  Date alignment check:")
-        logger.info(f"    Common dates: {overlap:,}")
-        logger.info(f"    Company-only dates: {len(company_dates - macro_dates):,}")
-        logger.info(f"    Macro-only dates: {len(macro_dates - company_dates):,}")
+        start_date = max(fred_daily.index.min(), market_daily.index.min())
+        end_date = min(fred_daily.index.max(), market_daily.index.max())
+        
+        # Create daily date range
+        daily_dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        
+        # Reindex FRED to daily and forward fill
+        # NOTE: Forward fill is OK here for macro data (changes slowly)
+        fred_daily = fred_daily.reindex(daily_dates)
+        fred_daily = fred_daily.ffill()  # Forward fill macro indicators
+        fred_daily = fred_daily.reset_index().rename(columns={'index': 'Date'})
+        
+        logger.info(f"   FRED: {len(fred_df):,} rows → {len(fred_daily):,} rows (daily)")
 
-        # Merge on Date (left join - keep all company-date observations)
-        logger.info(f"\nMerging on: Date (left join from Company)")
+        logger.info("\n2. Market data already daily...")
+        market_daily = market_daily.reset_index().rename(columns={'index': 'Date'})
+        logger.info(f"   Market: {len(market_daily):,} rows (daily)")
+
+        # Merge on Date
+        logger.info("\n3. Merging FRED + Market on daily dates...")
         
         merged = pd.merge(
-            company_df,
-            macro_market,
+            fred_daily,
+            market_daily,
             on='Date',
-            how='left',
-            suffixes=('', '_macro')
+            how='inner',  # Keep only dates with both FRED and Market
+            suffixes=('_fred', '_market')
         )
 
-        # Sort by Company and Date
-        merged.sort_values(['Company', 'Date'], inplace=True)
+        merged.sort_values('Date', inplace=True)
         merged.reset_index(drop=True, inplace=True)
 
-        logger.info(f"\n✓ Final merged shape: {merged.shape}")
+        logger.info(f"\n✓ Pipeline 1b merged (DAILY): {merged.shape}")
+        logger.info(f"  Date range: {merged['Date'].min().date()} to {merged['Date'].max().date()}")
+        logger.info(f"  Days: {len(merged):,}")
+        logger.info(f"  Missing: {merged.isna().sum().sum() / merged.size * 100:.2f}%")
+        
+        return merged
+
+    # ========== PIPELINE 2: MACRO + MARKET + COMPANY ==========
+
+    def merge_pipeline2(self, macro_quarterly_df: pd.DataFrame,
+                       company_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Pipeline 2: Merge quarterly macro + company data for prediction.
+        
+        SIMPLIFIED: Both are already quarterly with features.
+        Just need to merge on Date using merge_asof for alignment.
+        """
+        logger.info("\n" + "="*80)
+        logger.info("PIPELINE 2: MACRO + COMPANY (FOR PREDICTION)")
+        logger.info("="*80)
+
+        logger.info(f"\n  Macro quarterly: {macro_quarterly_df.shape}")
+        logger.info(f"  Company quarterly: {company_df.shape}")
+        logger.info(f"  Companies: {company_df['Company'].nunique()}")
+
+        # Use merge_asof for date alignment
+        logger.info("\n  Using merge_asof for date alignment...")
+        
+        # Sort both by date
+        company_sorted = company_df.sort_values('Date').copy()
+        macro_sorted = macro_quarterly_df.sort_values('Date').copy()
+        
+        # Group by company and merge
+        merged_parts = []
+        
+        for company in company_sorted['Company'].unique():
+            company_data = company_sorted[company_sorted['Company'] == company].copy()
+            
+            # Merge asof: for each company date, find nearest past macro date
+            company_merged = pd.merge_asof(
+                company_data,
+                macro_sorted,
+                on='Date',
+                direction='backward',
+                tolerance=pd.Timedelta(days=100),
+                suffixes=('', '_macro')
+            )
+            
+            merged_parts.append(company_merged)
+        
+        merged = pd.concat(merged_parts, ignore_index=True)
+        merged.sort_values(['Company', 'Date'], inplace=True)
+
+        logger.info(f"\n✓ Pipeline 2 merged: {merged.shape}")
         logger.info(f"  Companies: {merged['Company'].nunique()}")
         logger.info(f"  Date range: {merged['Date'].min().date()} to {merged['Date'].max().date()}")
-        logger.info(f"  Rows per company: ~{len(merged) / merged['Company'].nunique():.0f}")
 
-        # === MERGE QUALITY CHECK ===
-        logger.info(f"\n" + "="*80)
-        logger.info(f"MERGE QUALITY CHECK")
-        logger.info(f"="*80)
-
-        # Check for missing values by source
-        company_cols = [col for col in company_df.columns if col not in ['Date', 'Company']]
-        fred_cols = [col for col in fred_df.columns if col not in ['Date']]
-        market_cols = [col for col in market_df.columns if col not in ['Date']]
-
-        missing_pct = (merged.isna().sum() / len(merged)) * 100
-
-        logger.info(f"\nMissing values by source:")
-
-        # Company features
-        company_missing = missing_pct[[col for col in company_cols if col in merged.columns]].mean() if company_cols else 0
-        logger.info(f"  Company features: {company_missing:.1f}% avg missing")
-
-        # Macro features
-        macro_missing = missing_pct[[col for col in fred_cols if col in merged.columns]].mean() if fred_cols else 0
-        logger.info(f"  Macro features:   {macro_missing:.1f}% avg missing")
-
-        # Market features
-        market_missing = missing_pct[[col for col in market_cols if col in merged.columns]].mean() if market_cols else 0
-        logger.info(f"  Market features:  {market_missing:.1f}% avg missing")
-
-        # Overall
-        total_missing = missing_pct.mean()
-        logger.info(f"  Overall:          {total_missing:.1f}% avg missing")
-
-        # === HANDLE MISSING VALUES FROM MERGE ===
-        if total_missing > 1:
-            logger.info(f"\n  Filling missing values from merge misalignment...")
-
-            # For each company separately (to avoid cross-contamination)
-            filled_dfs = []
-            for company in merged['Company'].unique():
-                company_data = merged[merged['Company'] == company].copy()
-
-                # Forward fill within company
-                company_data = company_data.ffill()
-
-                # Backward fill any remaining (at start of series)
-                company_data = company_data.bfill()
-
-                filled_dfs.append(company_data)
-
-            merged = pd.concat(filled_dfs, ignore_index=True)
-            merged.sort_values(['Company', 'Date'], inplace=True)
-
-            # Check after filling
-            missing_after = (merged.isna().sum() / len(merged)) * 100
-            total_missing_after = missing_after.mean()
-            logger.info(f"  ✓ Overall missing after fill: {total_missing_after:.2f}%")
+        # Check if macro columns merged
+        macro_cols = [col for col in macro_sorted.columns if col not in ['Date', 'Quarter']]
+        macro_present = sum(1 for col in macro_cols if col in merged.columns)
+        
+        logger.info(f"\n  Macro columns merged: {macro_present}/{len(macro_cols)}")
+        
+        if macro_present >= len(macro_cols) * 0.8:
+            logger.info(f"  ✓ Macro data successfully merged")
         else:
-            logger.info(f"  ✓ Minimal missing values, no filling needed")
+            logger.warning(f"  ⚠️  Only {macro_present}/{len(macro_cols)} macro columns merged")
 
-        # === VERIFY DATA INTEGRITY FOR SAMPLE COMPANY ===
-        logger.info(f"\n" + "="*80)
-        logger.info(f"DATA INTEGRITY CHECK (Sample Company)")
-        logger.info(f"="*80)
-
-        sample_company = merged['Company'].iloc[0]
-        sample_data = merged[merged['Company'] == sample_company]
-
-        logger.info(f"\nCompany: {sample_company}")
-        logger.info(f"  Total rows: {len(sample_data):,}")
-        logger.info(f"  Date range: {sample_data['Date'].min().date()} to {sample_data['Date'].max().date()}")
-
-        # Check key columns have data
-        key_checks = {
-            'Stock_Price': 'Company data',
-            'Revenue': 'Company financials',
-            'GDP': 'Macro data',
-            'VIX': 'Market data'
-        }
-
-        logger.info(f"\n  Key columns availability:")
-        for col, source in key_checks.items():
-            # Handle alternative column names
-            check_col = col
-            if col == 'Stock_Price' and col not in sample_data.columns:
-                if 'Close' in sample_data.columns:
-                    check_col = 'Close'
-            
-            if check_col in sample_data.columns:
-                avail_count = sample_data[check_col].notna().sum()
-                avail_pct = (avail_count / len(sample_data)) * 100
-                logger.info(f"    {col:20s} ({source:20s}): {avail_count:6,} rows ({avail_pct:5.1f}%)")
-            else:
-                logger.warning(f"    {col:20s} ({source:20s}): ❌ NOT FOUND")
-
-        # Show sample rows
-        logger.info(f"\n  Sample rows (first 3):")
-        display_cols = ['Date', 'Company', 'Stock_Price', 'Revenue', 'GDP', 'VIX']
-        
-        # Handle alternative column names
-        if 'Stock_Price' not in sample_data.columns and 'Close' in sample_data.columns:
-            display_cols[display_cols.index('Stock_Price')] = 'Close'
-        
-        available_display = [col for col in display_cols if col in sample_data.columns]
-        print(sample_data[available_display].head(3).to_string(index=False))
+        # Check missing
+        missing_pct = (merged.isna().sum().sum() / merged.size) * 100
+        logger.info(f"\n  Missing: {missing_pct:.2f}%")
 
         return merged
 
-    # ========== CHECK DUPLICATE COLUMNS ==========
+    # ========== SAVE FUNCTIONS ==========
 
-    def check_duplicate_columns(self, df: pd.DataFrame, pipeline_name: str):
-        """Check for duplicate columns with suffixes."""
-        logger.info(f"\nChecking for duplicate columns in {pipeline_name}...")
-        
-        # Look for common suffixes
-        suffixes = ['_x', '_y', '_fred', '_market', '_macro', '_company']
-        duplicate_cols = [col for col in df.columns if any(col.endswith(suffix) for suffix in suffixes)]
-        
-        if duplicate_cols:
-            logger.warning(f"  ⚠️  Found {len(duplicate_cols)} columns with suffixes:")
-            
-            # Group by base name
-            dup_groups = {}
-            for col in duplicate_cols:
-                for suffix in suffixes:
-                    if col.endswith(suffix):
-                        base = col[:-len(suffix)]
-                        if base not in dup_groups:
-                            dup_groups[base] = []
-                        dup_groups[base].append(col)
-            
-            for base, cols in list(dup_groups.items())[:5]:  # Show first 5
-                logger.warning(f"     {base}: {cols}")
-            
-            if len(dup_groups) > 5:
-                logger.warning(f"     ... and {len(dup_groups) - 5} more")
-            
-            logger.info(f"  Note: These will be cleaned in Step 3c (Post-Merge Cleaning)")
-        else:
-            logger.info(f"  ✓ No duplicate columns with suffixes")
-
-    # ========== SAVE MERGED DATASETS ==========
-
-    def save_merged_datasets(self, pipeline1_df: pd.DataFrame, pipeline2_df: pd.DataFrame):
-        """Save merged datasets to CSV format."""
+    def save_merged_datasets(self, pipeline1_quarterly: pd.DataFrame, 
+                            pipeline1_daily: pd.DataFrame,
+                            pipeline2_df: pd.DataFrame):
+        """Save merged datasets (now includes daily macro for VAE)."""
         logger.info("\n" + "="*80)
         logger.info("SAVING MERGED DATASETS")
         logger.info("="*80)
 
-        # === Save Pipeline 1 ===
-        pipeline1_path = self.features_dir / 'macro_features.csv'
-        pipeline1_df.to_csv(pipeline1_path, index=False)
+        # Pipeline 1a: Quarterly (for quarterly VAE)
+        pipeline1a_path = self.features_dir / 'macro_features_quarterly.csv'
+        pipeline1_quarterly.to_csv(pipeline1a_path, index=False)
         
-        logger.info(f"\n✓ Saved Pipeline 1 (VAE):")
-        logger.info(f"  Path:  {pipeline1_path}")
-        logger.info(f"  Shape: {pipeline1_df.shape}")
-        logger.info(f"  Size:  {pipeline1_path.stat().st_size / 1024 / 1024:.2f} MB")
+        logger.info(f"\n✓ Pipeline 1a (VAE - Quarterly):")
+        logger.info(f"  Path:  {pipeline1a_path}")
+        logger.info(f"  Shape: {pipeline1_quarterly.shape}")
+        logger.info(f"  Size:  {pipeline1a_path.stat().st_size / (1024*1024):.2f} MB")
+        logger.info(f"  Use:   Train VAE on quarterly scenarios")
 
-        # === Save Pipeline 2 ===
+        # Pipeline 1b: Daily (for daily VAE) - NEW!
+        pipeline1b_path = self.features_dir / 'macro_features_daily.csv'
+        pipeline1_daily.to_csv(pipeline1b_path, index=False)
+        
+        logger.info(f"\n✓ Pipeline 1b (VAE - Daily):")
+        logger.info(f"  Path:  {pipeline1b_path}")
+        logger.info(f"  Shape: {pipeline1_daily.shape}")
+        logger.info(f"  Size:  {pipeline1b_path.stat().st_size / (1024*1024):.2f} MB")
+        logger.info(f"  Use:   Train VAE on daily scenarios (MORE DATA)")
+
+        # Pipeline 2: Quarterly (for prediction)
         pipeline2_path = self.features_dir / 'merged_features.csv'
         pipeline2_df.to_csv(pipeline2_path, index=False)
         
-        logger.info(f"\n✓ Saved Pipeline 2 (XGBoost/LSTM):")
+        logger.info(f"\n✓ Pipeline 2 (Prediction - Quarterly):")
         logger.info(f"  Path:  {pipeline2_path}")
         logger.info(f"  Shape: {pipeline2_df.shape}")
-        logger.info(f"  Size:  {pipeline2_path.stat().st_size / 1024 / 1024:.2f} MB")
+        logger.info(f"  Size:  {pipeline2_path.stat().st_size / (1024*1024):.2f} MB")
+        logger.info(f"  Use:   Train XGBoost/LSTM for outcome prediction")
 
-        # === Save column lists for reference ===
-        logger.info(f"\nSaving column lists for reference...")
+        # Save column lists
+        logger.info(f"\n  Saving column lists...")
         
-        with open(self.features_dir / 'pipeline1_columns.txt', 'w') as f:
-            f.write("PIPELINE 1 (VAE) - COLUMN LIST\n")
+        with open(self.features_dir / 'pipeline1_quarterly_columns.txt', 'w') as f:
+            f.write("PIPELINE 1a (VAE - Quarterly) - COLUMNS\n")
             f.write("="*80 + "\n\n")
-            for col in sorted(pipeline1_df.columns):
-                f.write(f"{col}\n")
+            for i, col in enumerate(sorted(pipeline1_quarterly.columns), 1):
+                f.write(f"{i:3d}. {col}\n")
+
+        with open(self.features_dir / 'pipeline1_daily_columns.txt', 'w') as f:
+            f.write("PIPELINE 1b (VAE - Daily) - COLUMNS\n")
+            f.write("="*80 + "\n\n")
+            for i, col in enumerate(sorted(pipeline1_daily.columns), 1):
+                f.write(f"{i:3d}. {col}\n")
 
         with open(self.features_dir / 'pipeline2_columns.txt', 'w') as f:
-            f.write("PIPELINE 2 (XGBOOST/LSTM) - COLUMN LIST\n")
+            f.write("PIPELINE 2 (PREDICTION - Quarterly) - COLUMNS\n")
             f.write("="*80 + "\n\n")
-            for col in sorted(pipeline2_df.columns):
-                f.write(f"{col}\n")
+            for i, col in enumerate(sorted(pipeline2_df.columns), 1):
+                f.write(f"{i:3d}. {col}\n")
 
-        logger.info(f"  ✓ Column lists saved:")
-        logger.info(f"     - {self.features_dir / 'pipeline1_columns.txt'}")
-        logger.info(f"     - {self.features_dir / 'pipeline2_columns.txt'}")
+        logger.info(f"  ✓ Column lists saved")
 
-    # ========== GENERATE MERGE REPORT ==========
+    # ========== GENERATE REPORT ==========
 
-    def generate_merge_report(self, fred_df: pd.DataFrame, market_df: pd.DataFrame,
-                            company_df: pd.DataFrame, pipeline1_df: pd.DataFrame,
-                            pipeline2_df: pd.DataFrame):
-        """Generate detailed merge quality report."""
-        logger.info(f"\nGenerating merge quality report...")
+    def generate_merge_report(self, pipeline1_quarterly: pd.DataFrame,
+                             pipeline1_daily: pd.DataFrame,
+                             pipeline2_df: pd.DataFrame):
+        """Generate merge quality report."""
+        logger.info(f"\n  Generating merge report...")
         
         report_data = []
 
-        # Pipeline 1 stats
+        # Pipeline 1a stats (quarterly)
         report_data.append({
-            'Pipeline': 'Pipeline 1 (VAE)',
-            'Dataset': 'macro_features.csv',
-            'Input_Datasets': 'FRED + Market',
-            'Rows': len(pipeline1_df),
-            'Columns': len(pipeline1_df.columns),
-            'Missing_Pct': (pipeline1_df.isna().sum().sum() / pipeline1_df.size) * 100,
-            'Date_Range_Days': (pipeline1_df['Date'].max() - pipeline1_df['Date'].min()).days
+            'Pipeline': 'Pipeline 1a (VAE - Quarterly)',
+            'Dataset': 'macro_features_quarterly.csv',
+            'Input': 'FRED + Market',
+            'Frequency': 'Quarterly',
+            'Rows': len(pipeline1_quarterly),
+            'Columns': len(pipeline1_quarterly.columns),
+            'Missing_Pct': round((pipeline1_quarterly.isna().sum().sum() / pipeline1_quarterly.size) * 100, 2),
+            'Date_Range': f"{pipeline1_quarterly['Date'].min().date()} to {pipeline1_quarterly['Date'].max().date()}"
+        })
+
+        # Pipeline 1b stats (daily) - NEW!
+        report_data.append({
+            'Pipeline': 'Pipeline 1b (VAE - Daily)',
+            'Dataset': 'macro_features_daily.csv',
+            'Input': 'FRED + Market',
+            'Frequency': 'Daily',
+            'Rows': len(pipeline1_daily),
+            'Columns': len(pipeline1_daily.columns),
+            'Missing_Pct': round((pipeline1_daily.isna().sum().sum() / pipeline1_daily.size) * 100, 2),
+            'Date_Range': f"{pipeline1_daily['Date'].min().date()} to {pipeline1_daily['Date'].max().date()}"
         })
 
         # Pipeline 2 stats
         report_data.append({
-            'Pipeline': 'Pipeline 2 (Prediction)',
+            'Pipeline': 'Pipeline 2 (Prediction - Quarterly)',
             'Dataset': 'merged_features.csv',
-            'Input_Datasets': 'FRED + Market + Company',
+            'Input': 'FRED + Market + Company',
+            'Frequency': 'Quarterly',
             'Rows': len(pipeline2_df),
             'Columns': len(pipeline2_df.columns),
-            'Missing_Pct': (pipeline2_df.isna().sum().sum() / pipeline2_df.size) * 100,
-            'Date_Range_Days': (pipeline2_df['Date'].max() - pipeline2_df['Date'].min()).days
+            'Missing_Pct': round((pipeline2_df.isna().sum().sum() / pipeline2_df.size) * 100, 2),
+            'Date_Range': f"{pipeline2_df['Date'].min().date()} to {pipeline2_df['Date'].max().date()}"
         })
 
         report_df = pd.DataFrame(report_data)
@@ -514,145 +461,135 @@ class DataMerger:
     # ========== MAIN PIPELINE ==========
 
     def run_merging_pipeline(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Execute complete data merging pipeline."""
+        """
+        Execute merging pipeline.
+        
+        SIMPLIFIED: Step 2 already created the files we need.
+        Just pass them through with proper naming.
+        """
         logger.info("\n" + "="*80)
-        logger.info("STEP 3: DATA MERGING PIPELINE")
+        logger.info("STEP 3: DATA MERGING (SIMPLIFIED)")
         logger.info("="*80)
-        logger.info("\nCreating two merged datasets:")
-        logger.info("  1. macro_features.csv (FRED + Market) for VAE")
-        logger.info("  2. merged_features.csv (FRED + Market + Company) for XGBoost/LSTM")
+        logger.info("\nStep 2 already created:")
+        logger.info("  ✓ macro_features_daily.csv (for VAE)")
+        logger.info("  ✓ macro_features_quarterly.csv (quarterly aggregates)")
+        logger.info("\nStep 3 will:")
+        logger.info("  1. Load macro_quarterly + company")
+        logger.info("  2. Merge them → merged_features.csv")
+        logger.info("  3. Copy macro_daily → macro_features_clean.csv (for VAE)")
         logger.info("="*80)
 
         overall_start = time.time()
 
-        # Load feature datasets
+        # Load data
         data = self.load_feature_datasets()
 
-        # === MERGE PIPELINE 1: FRED + Market ===
-        pipeline1_merged = self.merge_pipeline1(data['fred'], data['market'])
-        
-        # Check for duplicates
-        self.check_duplicate_columns(pipeline1_merged, "Pipeline 1")
+        if 'macro_daily' not in data:
+            logger.error("❌ macro_features_daily.csv not found!")
+            logger.error("   Run Step 2 first to create this file")
+            raise FileNotFoundError("macro_features_daily.csv missing")
 
-        # === MERGE PIPELINE 2: FRED + Market + Company ===
-        pipeline2_merged = self.merge_pipeline2(data['fred'], data['market'], data['company'])
-        
-        # Check for duplicates
-        self.check_duplicate_columns(pipeline2_merged, "Pipeline 2")
+        if 'macro_quarterly' not in data:
+            logger.error("❌ macro_features_quarterly.csv not found!")
+            logger.error("   Run Step 2 first to create this file")
+            raise FileNotFoundError("macro_features_quarterly.csv missing")
 
-        # === SAVE MERGED DATASETS ===
-        self.save_merged_datasets(pipeline1_merged, pipeline2_merged)
-
-        # === GENERATE REPORT ===
-        report = self.generate_merge_report(
-            data['fred'], data['market'], data['company'],
-            pipeline1_merged, pipeline2_merged
-        )
-
-        # === FINAL SUMMARY ===
-        elapsed = time.time() - overall_start
-
+        # === Pipeline 1: Macro Daily (for VAE) - Just copy ===
         logger.info("\n" + "="*80)
-        logger.info("MERGING COMPLETE - SUMMARY")
+        logger.info("PIPELINE 1: MACRO DAILY (FOR VAE)")
+        logger.info("="*80)
+        logger.info("\n  Macro daily already has all features from Step 2")
+        logger.info("  Just copying to final location...")
+        
+        macro_daily = data['macro_daily'].copy()
+        
+        logger.info(f"\n✓ Pipeline 1 ready: {macro_daily.shape}")
+        logger.info(f"  Date range: {macro_daily['Date'].min().date()} to {macro_daily['Date'].max().date()}")
+        logger.info(f"  Rows: {len(macro_daily):,} (daily)")
+        
+        # === Pipeline 2: Macro Quarterly + Company ===
+        logger.info("\n" + "="*80)
+        logger.info("PIPELINE 2: MACRO QUARTERLY + COMPANY (FOR PREDICTION)")
+        logger.info("="*80)
+        
+        pipeline2_merged = self.merge_pipeline2(data['macro_quarterly'], data['company'])
+
+        # === Save ===
+        logger.info("\n" + "="*80)
+        logger.info("SAVING MERGED DATASETS")
         logger.info("="*80)
 
-        print("\n" + report.to_string(index=False))
+        # Save macro_daily as macro_features_clean.csv (for VAE)
+        macro_output = self.features_dir / 'macro_features_clean.csv'
+        macro_daily.to_csv(macro_output, index=False)
+        logger.info(f"\n✓ Saved: {macro_output}")
+        logger.info(f"  Shape: {macro_daily.shape}")
+        logger.info(f"  Use: VAE training (daily with quarterly aggregates)")
 
-        logger.info(f"\n📊 PIPELINE 1 (VAE - Scenario Generation):")
-        logger.info(f"  Dataset:    macro_features.csv")
-        logger.info(f"  Purpose:    Train VAE to generate stress scenarios")
-        logger.info(f"  Shape:      {pipeline1_merged.shape[0]:,} rows × {pipeline1_merged.shape[1]} columns")
-        logger.info(f"  Frequency:  Daily")
-        logger.info(f"  Date range: {pipeline1_merged['Date'].min().date()} to {pipeline1_merged['Date'].max().date()}")
-        logger.info(f"  Features:   Macro + Market indicators")
+        # Save merged_features.csv (for prediction)
+        merged_output = self.features_dir / 'merged_features.csv'
+        pipeline2_merged.to_csv(merged_output, index=False)
+        logger.info(f"\n✓ Saved: {merged_output}")
+        logger.info(f"  Shape: {pipeline2_merged.shape}")
+        logger.info(f"  Use: XGBoost/LSTM training")
 
-        logger.info(f"\n📊 PIPELINE 2 (XGBoost/LSTM - Prediction):")
-        logger.info(f"  Dataset:    merged_features.csv")
-        logger.info(f"  Purpose:    Train models to predict company outcomes")
-        logger.info(f"  Shape:      {pipeline2_merged.shape[0]:,} rows × {pipeline2_merged.shape[1]} columns")
-        logger.info(f"  Frequency:  Daily")
-        logger.info(f"  Companies:  {pipeline2_merged['Company'].nunique()}")
-        logger.info(f"  Date range: {pipeline2_merged['Date'].min().date()} to {pipeline2_merged['Date'].max().date()}")
-        logger.info(f"  Features:   Macro + Market + Company indicators")
+        elapsed = time.time() - overall_start
 
-        logger.info(f"\n⏱️  Total Time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
+        # === SUMMARY ===
+        logger.info("\n" + "="*80)
+        logger.info("MERGING COMPLETE")
+        logger.info("="*80)
+
+        logger.info(f"\n📊 FINAL OUTPUT FILES:")
+        logger.info(f"  1. macro_features_clean.csv")
+        logger.info(f"     - Daily FRED + Market with quarterly aggregates")
+        logger.info(f"     - Shape: {macro_daily.shape}")
+        logger.info(f"     - Use: VAE training")
+        
+        logger.info(f"\n  2. merged_features.csv")
+        logger.info(f"     - Quarterly company + macro data")
+        logger.info(f"     - Shape: {pipeline2_merged.shape}")
+        logger.info(f"     - Use: Prediction models")
+
+        logger.info(f"\n⏱️  Total Time: {elapsed:.1f}s")
         logger.info("="*80)
 
         logger.info("\n✅ Step 3 Complete!")
-        logger.info("\n➡️  Next Steps:")
-        logger.info("   1. Validate merged data: python src/validation/validate_checkpoint_3_merged.py")
-        logger.info("   2. Clean merged data: python step3c_post_merge_cleaning.py")
-        logger.info("   3. Then interaction features: python step3b_interaction_features.py")
+        logger.info("\n➡️  Next: python step4_post_merge_cleaning.py")
 
-        return pipeline1_merged, pipeline2_merged
+        return macro_daily, pipeline2_merged
 
 
 def main():
     """Execute Step 3: Data Merging."""
 
-    merger = DataMerger(features_dir="data/features")
+    merger = QuarterlyDataMerger(features_dir="data/features")
 
     try:
-        pipeline1, pipeline2 = merger.run_merging_pipeline()
+        macro_daily, merged_quarterly = merger.run_merging_pipeline()
 
         # === SHOW SAMPLE DATA ===
         logger.info("\n" + "="*80)
         logger.info("SAMPLE DATA PREVIEW")
         logger.info("="*80)
 
-        logger.info("\n1. PIPELINE 1 (macro_features.csv) - First 5 rows, key columns:")
-        p1_cols = ['Date', 'GDP', 'CPI', 'Unemployment_Rate', 'VIX', 'SP500_Return_1D']
-        available_p1_cols = [col for col in p1_cols if col in pipeline1.columns]
-        print(pipeline1[available_p1_cols].head().to_string())
+        logger.info("\n1. macro_features_clean.csv (for VAE) - First 5 rows:")
+        display_cols = ['Date', 'GDP', 'VIX', 'vix_mean_q', 'sp500_q_return']
+        available_cols = [col for col in display_cols if col in macro_daily.columns]
+        if available_cols:
+            print(macro_daily[available_cols].head().to_string(index=False))
 
-        logger.info("\n2. PIPELINE 2 (merged_features.csv) - First 5 rows, key columns:")
-        p2_cols = ['Date', 'Company', 'Stock_Price', 'Revenue', 'GDP', 'VIX', 'Stock_Return_1D']
-        
-        # Handle alternative column names
-        if 'Stock_Price' not in pipeline2.columns and 'Close' in pipeline2.columns:
-            p2_cols[p2_cols.index('Stock_Price')] = 'Close'
-        
-        available_p2_cols = [col for col in p2_cols if col in pipeline2.columns]
-        print(pipeline2[available_p2_cols].head().to_string())
-
-        logger.info("\n" + "="*80)
-        logger.info("COLUMN COUNT BY DATASET")
-        logger.info("="*80)
-        logger.info(f"Pipeline 1 (macro_features):  {len(pipeline1.columns)} columns")
-        logger.info(f"Pipeline 2 (merged_features): {len(pipeline2.columns)} columns")
-
-        # Show feature categories
-        logger.info("\n" + "="*80)
-        logger.info("FEATURE CATEGORIES IN PIPELINE 2")
-        logger.info("="*80)
-        
-        # Count features by category
-        macro_features = [col for col in pipeline2.columns if any(
-            keyword in col for keyword in ['GDP', 'CPI', 'Unemployment', 'Federal', 'Inflation']
-        )]
-        
-        market_features = [col for col in pipeline2.columns if any(
-            keyword in col for keyword in ['VIX', 'SP500']
-        )]
-        
-        stock_features = [col for col in pipeline2.columns if any(
-            keyword in col for keyword in ['Stock', 'Close', 'Volume', 'RSI', 'MACD']
-        )]
-        
-        financial_features = [col for col in pipeline2.columns if any(
-            keyword in col for keyword in ['Revenue', 'Income', 'Assets', 'Debt', 'Equity', 'ROE', 'ROA', 'Margin']
-        )]
-        
-        logger.info(f"Macro features:     {len(macro_features)}")
-        logger.info(f"Market features:    {len(market_features)}")
-        logger.info(f"Stock features:     {len(stock_features)}")
-        logger.info(f"Financial features: {len(financial_features)}")
+        logger.info("\n2. merged_features.csv (for Prediction) - First 5 rows:")
+        display_cols = ['Date', 'Company', 'Stock_Price', 'Revenue', 'net_margin_q', 'vix_mean_q']
+        available_cols = [col for col in display_cols if col in merged_quarterly.columns]
+        if available_cols:
+            print(merged_quarterly[available_cols].head().to_string(index=False))
 
         logger.info("\n" + "="*80)
         logger.info("✅ STEP 3 SUCCESSFULLY COMPLETED")
         logger.info("="*80)
 
-        return pipeline1, pipeline2
+        return macro_daily, merged_quarterly
 
     except FileNotFoundError as e:
         logger.error(f"\n❌ ERROR: {e}")

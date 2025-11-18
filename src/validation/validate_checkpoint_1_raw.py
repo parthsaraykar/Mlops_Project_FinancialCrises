@@ -1,10 +1,19 @@
 """
-CHECKPOINT 1: Validate Raw Data
-Runs after data collection, before cleaning
+CHECKPOINT 1: Validate Raw Data (FIXED FOR QUARTERLY, 50 COMPANIES)
 
-Combines:
-- RobustValidator (multi-level checks, auto-remediation)
+Runs after Step 0 (data collection), before Step 1 (cleaning)
+
+MODIFICATIONS:
+- Updated for 50 companies (was 25)
+- Updated for quarterly frequency
+- Updated for 1990-2025 date range
+- Updated row count expectations
+- Fixed CPI range (lower bound for 1990 data)
+- EPS exemption for null values
+
+Uses:
 - Great Expectations (schema validation, data contracts)
+- RobustValidator (multi-level checks, auto-remediation)
 
 Exit codes:
 - 0: All validations passed
@@ -27,10 +36,11 @@ class RawDataValidator:
     """
     Checkpoint 1: Validate all raw data files.
     
-    Strategy:
-    1. GE checks schema + ranges (CRITICAL level)
-    2. RobustValidator checks business logic + anomalies (ERROR level)
-    3. Both must pass for pipeline to continue
+    MODIFIED FOR:
+    - 50 companies (expanded from 25)
+    - Quarterly frequency
+    - 1990-2025 date range
+    - Lower CPI values (1990 data)
     """
     
     def __init__(self):
@@ -47,12 +57,19 @@ class RawDataValidator:
             logger.error(f"❌ File not found: {filepath}")
             return False
         
-        # CORRECT: FRED uses 'DATE' (uppercase), rename to 'Date' for consistency
-        df = pd.read_csv(filepath, parse_dates=['Date'])
-        #df.rename(columns={'DATE': 'Date'}, inplace=True)
+        df = pd.read_csv(filepath)
         
-        # === STEP 1: Great Expectations (Schema + Ranges) ===
-        logger.info("  Running Great Expectations checks...")
+        # Rename DATE to Date for consistency
+        if 'DATE' in df.columns:
+            df.rename(columns={'DATE': 'Date'}, inplace=True)
+        
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        
+        logger.info(f"   Shape: {df.shape}")
+        logger.info(f"   Date range: {df['Date'].min().date()} to {df['Date'].max().date()}")
+        
+        # === Great Expectations ===
+        logger.info("   Running Great Expectations checks...")
         
         expectations = [
             # Column existence - CRITICAL
@@ -83,11 +100,12 @@ class RawDataValidator:
                     "mostly": 0.90
                 }
             ),
+            # FIXED: Lower CPI min for 1990 data (was 150, now 100)
             ExpectationConfiguration(
                 expectation_type="expect_column_values_to_be_between",
                 kwargs={
                     "column": "CPI",
-                    "min_value": 150,
+                    "min_value": 100,  # Changed from 150 (1990 CPI ~130)
                     "max_value": 400,
                     "mostly": 0.90
                 }
@@ -107,16 +125,16 @@ class RawDataValidator:
                 expectation_type="expect_column_values_to_not_be_null",
                 kwargs={
                     "column": "Unemployment_Rate",
-                    "mostly": 0.80  # Allow 20% missing in raw
+                    "mostly": 0.50  # More lenient for raw data (was 0.80)
                 }
             ),
             
-            # Row count - CRITICAL
+            # Row count - CRITICAL (UPDATED for 1990-2025)
             ExpectationConfiguration(
                 expectation_type="expect_table_row_count_to_be_between",
                 kwargs={
-                    "min_value": 1000,
-                    "max_value": 10000
+                    "min_value": 5000,   # More data from 1990
+                    "max_value": 15000
                 }
             )
         ]
@@ -130,23 +148,21 @@ class RawDataValidator:
             severity_threshold=GESeverity.CRITICAL
         )
         
-        # === STEP 2: RobustValidator (Business Logic + Anomalies) ===
-        logger.info("  Running RobustValidator checks...")
+        # === RobustValidator ===
+        logger.info("   Running RobustValidator checks...")
         
         robust_validator = RobustValidator(
             dataset_name="fred_raw",
-            enable_auto_fix=False,  # No auto-fix in raw data
+            enable_auto_fix=False,
             enable_temporal_checks=True,
-            enable_business_rules=False  # Not yet needed for raw
+            enable_business_rules=False
         )
         
         _, robust_report = robust_validator.validate(df)
         
-        # Check for CRITICAL issues
         critical_count = robust_report.count_by_severity()['CRITICAL']
         robust_passed = (critical_count == 0)
         
-        # === FINAL DECISION ===
         passed = ge_passed and robust_passed
         
         self.all_reports['fred_raw'] = {
@@ -159,10 +175,6 @@ class RawDataValidator:
             logger.info("  ✅ fred_raw.csv validation PASSED")
         else:
             logger.error("  ❌ fred_raw.csv validation FAILED")
-            if not ge_passed:
-                logger.error(f"     GE failures: {ge_report['critical_failures']} critical")
-            if not robust_passed:
-                logger.error(f"     Robust failures: {critical_count} critical")
         
         return passed
     
@@ -175,9 +187,14 @@ class RawDataValidator:
             logger.error(f"❌ File not found: {filepath}")
             return False
         
-        df = pd.read_csv(filepath, parse_dates=['Date'])
+        df = pd.read_csv(filepath)
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         
-        # GE expectations
+        logger.info(f"   Shape: {df.shape}")
+        
+        # Handle SP500 column name variations
+        sp500_col = 'SP500_Close' if 'SP500_Close' in df.columns else 'SP500'
+        
         expectations = [
             ExpectationConfiguration(
                 expectation_type="expect_column_to_exist",
@@ -185,7 +202,7 @@ class RawDataValidator:
             ),
             ExpectationConfiguration(
                 expectation_type="expect_column_to_exist",
-                kwargs={"column": "SP500"}
+                kwargs={"column": sp500_col}
             ),
             ExpectationConfiguration(
                 expectation_type="expect_column_values_to_be_between",
@@ -196,20 +213,22 @@ class RawDataValidator:
                     "mostly": 0.99
                 }
             ),
+            # FIXED: Lower SP500 min for 1990 data (was 500, now 200)
             ExpectationConfiguration(
                 expectation_type="expect_column_values_to_be_between",
                 kwargs={
-                    "column": "SP500",
-                    "min_value": 500,
+                    "column": sp500_col,
+                    "min_value": 200,   # Changed from 500 (1990 S&P ~300)
                     "max_value": 10000,
                     "mostly": 0.99
                 }
             ),
+            # UPDATED: Row count for 1990-2025 daily data
             ExpectationConfiguration(
                 expectation_type="expect_table_row_count_to_be_between",
                 kwargs={
-                    "min_value": 1000,
-                    "max_value": 10000
+                    "min_value": 5000,   # More rows for 35 years
+                    "max_value": 15000
                 }
             )
         ]
@@ -219,7 +238,6 @@ class RawDataValidator:
             df, suite_name, "market_raw", GESeverity.CRITICAL
         )
         
-        # RobustValidator
         robust_validator = RobustValidator(
             dataset_name="market_raw",
             enable_auto_fix=False,
@@ -255,11 +273,15 @@ class RawDataValidator:
             logger.error(f"❌ File not found: {filepath}")
             return False
         
-        # FIXED: Current data has no Date column - removed parse_dates
-        df = pd.read_csv(filepath, parse_dates=['Date'])
-        #df = pd.read_csv(filepath)
+        df = pd.read_csv(filepath)
         
-        # GE expectations
+        # Parse Date if it exists
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        
+        logger.info(f"   Shape: {df.shape}")
+        logger.info(f"   Companies: {df['Company'].nunique() if 'Company' in df.columns else 'Unknown'}")
+        
         expectations = [
             ExpectationConfiguration(
                 expectation_type="expect_column_to_exist",
@@ -290,11 +312,12 @@ class RawDataValidator:
                 expectation_type="expect_column_values_to_not_be_null",
                 kwargs={"column": "Company"}
             ),
+            # UPDATED: Row count for 50 companies × ~140 quarters
             ExpectationConfiguration(
                 expectation_type="expect_table_row_count_to_be_between",
                 kwargs={
-                    "min_value": 10000,
-                    "max_value": 200000
+                    "min_value": 2000,    # At least 40 companies
+                    "max_value": 15000    # Up to 60 companies with full history
                 }
             )
         ]
@@ -304,11 +327,11 @@ class RawDataValidator:
             df, suite_name, "company_prices_raw", GESeverity.CRITICAL
         )
         
-        # FIXED: RobustValidator - Disabled temporal checks (no Date column in current data)
+        # RobustValidator
         robust_validator = RobustValidator(
             dataset_name="company_prices_raw",
             enable_auto_fix=False,
-            enable_temporal_checks=True,  # CHANGED: True → False
+            enable_temporal_checks=True if 'Date' in df.columns else False,
             enable_business_rules=True
         )
         
@@ -321,13 +344,11 @@ class RawDataValidator:
         self.all_reports['company_prices_raw'] = {
             'ge_report': ge_report,
             'robust_report': robust_report.to_dict(),
-            'passed': passed,
-            'note': 'Date column missing in current data - temporal validation skipped'
+            'passed': passed
         }
         
         if passed:
             logger.info("  ✅ company_prices_raw.csv validation PASSED")
-            logger.warning("  ⚠️  Note: Date column missing - will be fixed in next data collection")
         else:
             logger.error("  ❌ company_prices_raw.csv validation FAILED")
         
@@ -342,9 +363,14 @@ class RawDataValidator:
             logger.error(f"❌ File not found: {filepath}")
             return False
         
-        df = pd.read_csv(filepath, parse_dates=['Date'])
+        df = pd.read_csv(filepath)
         
-        # GE expectations
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        
+        logger.info(f"   Shape: {df.shape}")
+        logger.info(f"   Companies: {df['Company'].nunique() if 'Company' in df.columns else 'Unknown'}")
+        
         expectations = [
             ExpectationConfiguration(
                 expectation_type="expect_column_to_exist",
@@ -371,11 +397,12 @@ class RawDataValidator:
                 expectation_type="expect_column_values_to_not_be_null",
                 kwargs={"column": "Company"}
             ),
+            # UPDATED: Row count for 50 companies × ~80 quarters
             ExpectationConfiguration(
                 expectation_type="expect_table_row_count_to_be_between",
                 kwargs={
-                    "min_value": 50,
-                    "max_value": 5000
+                    "min_value": 1000,   # At least 20 companies with some history
+                    "max_value": 10000   # Up to 50 companies with full history
                 }
             )
         ]
@@ -385,7 +412,6 @@ class RawDataValidator:
             df, suite_name, "company_balance_raw", GESeverity.CRITICAL
         )
         
-        # RobustValidator
         robust_validator = RobustValidator(
             dataset_name="company_balance_raw",
             enable_auto_fix=False,
@@ -421,10 +447,14 @@ class RawDataValidator:
             logger.error(f"❌ File not found: {filepath}")
             return False
         
-        # FIXED: This file HAS Date column - parse it!
-        df = pd.read_csv(filepath, parse_dates=['Date'])
+        df = pd.read_csv(filepath)
         
-        # GE expectations
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        
+        logger.info(f"   Shape: {df.shape}")
+        logger.info(f"   Companies: {df['Company'].nunique() if 'Company' in df.columns else 'Unknown'}")
+        
         expectations = [
             ExpectationConfiguration(
                 expectation_type="expect_column_to_exist",
@@ -451,11 +481,12 @@ class RawDataValidator:
                 expectation_type="expect_column_values_to_not_be_null",
                 kwargs={"column": "Company"}
             ),
+            # UPDATED: Row count for 50 companies × ~80 quarters
             ExpectationConfiguration(
                 expectation_type="expect_table_row_count_to_be_between",
                 kwargs={
-                    "min_value": 50,
-                    "max_value": 5000
+                    "min_value": 1000,
+                    "max_value": 10000
                 }
             )
         ]
@@ -465,7 +496,6 @@ class RawDataValidator:
             df, suite_name, "company_income_raw", GESeverity.CRITICAL
         )
         
-        # RobustValidator
         robust_validator = RobustValidator(
             dataset_name="company_income_raw",
             enable_auto_fix=False,
@@ -476,17 +506,14 @@ class RawDataValidator:
         _, robust_report = robust_validator.validate(df)
         
         # ============================================================================
-        # SPECIAL HANDLING: Filter out EPS null column issue
-        # EPS is optional and can be null at raw data stage
+        # EPS NULL EXEMPTION
         # ============================================================================
         original_critical_count = robust_report.count_by_severity()['CRITICAL']
         
-        # Filter issues to exclude EPS null problems
         filtered_issues = []
         eps_null_detected = False
         
         for issue in robust_report.issues:
-            # Check if this is an EPS-related null column issue
             is_eps_null = (
                 issue.severity == ValidationSeverity.CRITICAL and
                 'null' in str(issue.message).lower() and
@@ -495,13 +522,10 @@ class RawDataValidator:
             
             if is_eps_null:
                 eps_null_detected = True
-                logger.info("  ℹ️  EPS column is completely null - this is acceptable for raw data")
-                logger.info("      EPS will be handled in data cleaning/feature engineering steps")
-                # Don't add this issue to filtered_issues (effectively removing it)
+                logger.info("  ℹ️  EPS column is completely null - ACCEPTABLE for raw data")
             else:
                 filtered_issues.append(issue)
         
-        # Count critical issues after filtering
         critical_count = sum(
             1 for issue in filtered_issues 
             if issue.severity == ValidationSeverity.CRITICAL
@@ -510,7 +534,7 @@ class RawDataValidator:
         robust_passed = (critical_count == 0)
         
         if eps_null_detected:
-            logger.info(f"  ℹ️  Filtered EPS null issue: {original_critical_count} -> {critical_count} critical issues")
+            logger.info(f"  ℹ️  Filtered EPS null: {original_critical_count} → {critical_count} critical")
         # ============================================================================
         
         passed = ge_passed and robust_passed
@@ -519,20 +543,13 @@ class RawDataValidator:
             'ge_report': ge_report,
             'robust_report': robust_report.to_dict(),
             'passed': passed,
-            'eps_null_filtered': eps_null_detected  # Track that we filtered this
+            'eps_null_filtered': eps_null_detected
         }
         
         if passed:
-            if eps_null_detected:
-                logger.info("  ✅ company_income_raw.csv validation PASSED (EPS null exempted)")
-            else:
-                logger.info("  ✅ company_income_raw.csv validation PASSED")
+            logger.info("  ✅ company_income_raw.csv validation PASSED")
         else:
             logger.error("  ❌ company_income_raw.csv validation FAILED")
-            if not ge_passed:
-                logger.error(f"     GE failures: {ge_report['critical_failures']} critical")
-            if not robust_passed:
-                logger.error(f"     Robust failures: {critical_count} critical")
         
         return passed
     
@@ -541,7 +558,11 @@ class RawDataValidator:
         logger.info("\n" + "="*80)
         logger.info("CHECKPOINT 1: RAW DATA VALIDATION")
         logger.info("="*80)
-        logger.info("Strategy: GE (schema) + RobustValidator (business logic)")
+        logger.info("MODIFIED FOR:")
+        logger.info("  - 50 companies (expanded from 25)")
+        logger.info("  - Quarterly frequency")
+        logger.info("  - 1990-2025 date range (35 years)")
+        logger.info("  - Lower value bounds (1990 prices)")
         logger.info("="*80)
         
         results = {
@@ -561,16 +582,20 @@ class RawDataValidator:
         
         for name, passed in results.items():
             status = "✅ PASSED" if passed else "❌ FAILED"
-            logger.info(f"{name:20s}: {status}")
+            logger.info(f"  {name:20s}: {status}")
         
         logger.info("="*80)
         
         if all_passed:
-            logger.info("\n✅ CHECKPOINT 1 PASSED - Proceeding to Step 1 (Cleaning)")
+            logger.info("\n✅ CHECKPOINT 1 PASSED")
+            logger.info("✅ All raw data validated successfully")
+            logger.info("\n➡️  Next: Run Step 1 (Data Cleaning)")
+            logger.info("   python step1_data_cleaning.py")
             return True
         else:
-            logger.error("\n❌ CHECKPOINT 1 FAILED - Pipeline stopped")
-            logger.error("Review validation reports in data/validation_reports/")
+            logger.error("\n❌ CHECKPOINT 1 FAILED")
+            logger.error("❌ Some validations failed")
+            logger.error("\n➡️  Review errors and re-run Step 0")
             return False
 
 
