@@ -1,0 +1,38 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies
+COPY requirements.docker.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.docker.txt
+
+# Copy ONLY source code and configs
+COPY src/ ./src/
+COPY configs/ ./configs/
+# NOTE: data/ and outputs/ are mounted as volumes at runtime
+
+# Create empty directories for volumes
+RUN mkdir -p data logs models/anomaly_detection outputs/models/plots outputs/models/reports outputs/models/results mlruns
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV MLFLOW_TRACKING_URI=mlruns
+ENV PYTHONPATH=/app
+
+# Default command
+CMD ["python", "src/models/train_anomaly_detection.py"]
+
+# Expose MLflow port
+EXPOSE 5000
+
+LABEL maintainer="Parth Saraykar"
+LABEL project="Financial Stress Test Generator"
+LABEL model="Model 3 - Anomaly Detection"

@@ -1,0 +1,16 @@
+isolation_forest:
+  bootstrap: false
+  contamination: 0.01
+  max_features: 0.6
+  max_samples: 256
+  n_estimators: 100
+lof:
+  contamination: 0.01
+  metric: minkowski
+  n_neighbors: 30
+  p: 3
+one_class_svm:
+  degree: 3
+  gamma: 0.001
+  kernel: poly
+  nu: 0.1

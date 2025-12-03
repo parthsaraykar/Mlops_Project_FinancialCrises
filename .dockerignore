@@ -1,0 +1,53 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+venv_snorkel/
+env/
+.venv/
+ENV/
+
+# Data files - DO NOT COPY INTO IMAGE
+data/
+*.csv
+*.parquet
+*.pkl
+*.h5
+*.json
+*.xlsx
+
+# Outputs - mount as volumes instead
+outputs/
+mlruns/
+models/
+logs/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints/
+
+# DVC
+.dvc/
+*.dvc
+
+# Documentation
+*.md
+docs/
+
+# Temporary
+tmp/
+temp/
+*.log
